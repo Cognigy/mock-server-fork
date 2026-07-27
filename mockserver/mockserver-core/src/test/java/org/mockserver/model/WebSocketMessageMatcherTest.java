@@ -3,10 +3,13 @@ package org.mockserver.model;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNot.not;
@@ -156,6 +159,102 @@ public class WebSocketMessageMatcherTest {
             webSocketMessageMatcher().withResponses(webSocketMessage("a")),
             is(not(webSocketMessageMatcher().withResponses(webSocketMessage("b"))))
         );
+    }
+
+    @Test
+    public void shouldHaveNullDefaultTurnsAndOnExhausted() {
+        WebSocketMessageMatcher matcher = webSocketMessageMatcher();
+        assertThat(matcher.getTurns(), is(nullValue()));
+        assertThat(matcher.getOnExhausted(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldSetTurnsViaList() {
+        List<List<WebSocketMessage>> turns = Arrays.asList(
+            Arrays.asList(webSocketMessage("turn0-a"), webSocketMessage("turn0-b")),
+            Collections.singletonList(webSocketMessage("turn1"))
+        );
+
+        WebSocketMessageMatcher matcher = webSocketMessageMatcher()
+            .withText("ping")
+            .withTurns(turns);
+
+        assertThat(matcher.getTurns(), hasSize(2));
+        assertThat(matcher.getTurns().get(0), hasSize(2));
+        assertThat(matcher.getTurns().get(1), hasSize(1));
+    }
+
+    @Test
+    public void shouldAppendSingleTurn() {
+        WebSocketMessageMatcher matcher = webSocketMessageMatcher()
+            .withText("ping")
+            .withTurn(Collections.singletonList(webSocketMessage("turn0")))
+            .withTurn(Collections.singletonList(webSocketMessage("turn1")));
+
+        assertThat(matcher.getTurns(), hasSize(2));
+        assertThat(matcher.getTurns().get(0), contains(webSocketMessage("turn0")));
+        assertThat(matcher.getTurns().get(1), contains(webSocketMessage("turn1")));
+    }
+
+    @Test
+    public void shouldAllowEmptyTurnForFireAndForget() {
+        WebSocketMessageMatcher matcher = webSocketMessageMatcher()
+            .withText("status")
+            .withTurn(Collections.emptyList());
+
+        assertThat(matcher.getTurns(), hasSize(1));
+        assertThat(matcher.getTurns().get(0), is(empty()));
+    }
+
+    @Test
+    public void shouldSetOnExhausted() {
+        assertThat(
+            webSocketMessageMatcher().withOnExhausted(WebSocketOnExhausted.CLOSE).getOnExhausted(),
+            is(WebSocketOnExhausted.CLOSE)
+        );
+        assertThat(
+            webSocketMessageMatcher().withOnExhausted(WebSocketOnExhausted.REPEAT).getOnExhausted(),
+            is(WebSocketOnExhausted.REPEAT)
+        );
+    }
+
+    @Test
+    public void shouldBeEqualWhenSameTurnsAndOnExhausted() {
+        WebSocketMessageMatcher matcherOne = webSocketMessageMatcher()
+            .withText("ping")
+            .withTurn(Collections.singletonList(webSocketMessage("reply")))
+            .withOnExhausted(WebSocketOnExhausted.REPEAT);
+        WebSocketMessageMatcher matcherTwo = webSocketMessageMatcher()
+            .withText("ping")
+            .withTurn(Collections.singletonList(webSocketMessage("reply")))
+            .withOnExhausted(WebSocketOnExhausted.REPEAT);
+
+        assertThat(matcherOne, is(matcherTwo));
+        assertThat(matcherOne.hashCode(), is(matcherTwo.hashCode()));
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenDifferentTurns() {
+        assertThat(
+            webSocketMessageMatcher().withTurn(Collections.singletonList(webSocketMessage("a"))),
+            is(not(webSocketMessageMatcher().withTurn(Collections.singletonList(webSocketMessage("b")))))
+        );
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenDifferentOnExhausted() {
+        assertThat(
+            webSocketMessageMatcher().withText("ping").withOnExhausted(WebSocketOnExhausted.CLOSE),
+            is(not(webSocketMessageMatcher().withText("ping").withOnExhausted(WebSocketOnExhausted.REPEAT)))
+        );
+    }
+
+    @Test
+    public void shouldResetCachedHashCodeWhenTurnsMutated() {
+        WebSocketMessageMatcher matcher = webSocketMessageMatcher().withText("ping");
+        int before = matcher.hashCode();
+        matcher.withTurn(Collections.singletonList(webSocketMessage("reply")));
+        assertThat(matcher.hashCode(), is(not(before)));
     }
 
     @Test

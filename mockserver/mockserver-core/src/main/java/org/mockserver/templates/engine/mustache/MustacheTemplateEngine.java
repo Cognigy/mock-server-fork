@@ -18,6 +18,7 @@ import org.mockserver.templates.engine.helpers.RequestBodyExtractionHelper;
 import org.mockserver.templates.engine.helpers.ScenarioTemplateHelper;
 import org.mockserver.templates.engine.model.HttpRequestTemplateObject;
 import org.mockserver.templates.engine.model.HttpResponseTemplateObject;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.mockserver.templates.engine.serializer.HttpTemplateOutputDeserializer;
 import org.slf4j.event.Level;
 
@@ -162,6 +163,40 @@ public class MustacheTemplateEngine implements TemplateEngine {
             data.put("scenario", scenarioMustacheHelper);
             data.put("xPath", (Mustache.Lambda) (frag, out) -> evaluatedXPath(frag.execute(), request, out));
             data.put("jsonPath", (Mustache.Lambda) (frag, out) -> evaluateJsonPath(data, frag.execute(), request, out));
+            compiledTemplate.execute(data, writer);
+            return writer.toString();
+        } catch (Exception e) {
+            throw new RuntimeException(formatLogMessage("Exception:{}transforming template:{}for request:{}", isNotBlank(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName(), template, request), e);
+        }
+    }
+
+    @Override
+    public String renderTemplateText(String template, HttpRequest request, WebSocketFrameContext frame) {
+        try {
+            validateTemplate(template);
+            Writer writer = new StringWriter();
+            Template compiledTemplate = compiledTemplate(template);
+            Map<String, Object> data = new ConcurrentHashMap<>();
+            // the "request" template variable stays bound to the real (upgrade) request
+            data.put("request", new HttpRequestTemplateObject(request));
+            if (frame != null) {
+                // jmustache reads POJO getters, so {{frame.text}} / {{frame.turnIndex}} resolve directly
+                data.put("frame", frame);
+            }
+            data.putAll(TemplateFunctions.BUILT_IN_FUNCTIONS);
+            data.putAll(TemplateFunctions.BUILT_IN_HELPERS);
+            if (seededFaker != null) {
+                data.put("faker", seededFaker);
+            }
+            data.put("scenario", scenarioMustacheHelper);
+            // bind jsonPath/xPath to the inbound frame body when the frame carries text, so a matcher
+            // response can extract from the frame that triggered the match; a binary-only frame (text
+            // null) keeps them bound to the real request, as does the no-frame case
+            HttpRequest extractionRequest = (frame != null && frame.getText() != null)
+                ? new HttpRequest().withBody(frame.getText())
+                : request;
+            data.put("xPath", (Mustache.Lambda) (frag, out) -> evaluatedXPath(frag.execute(), extractionRequest, out));
+            data.put("jsonPath", (Mustache.Lambda) (frag, out) -> evaluateJsonPath(data, frag.execute(), extractionRequest, out));
             compiledTemplate.execute(data, writer);
             return writer.toString();
         } catch (Exception e) {

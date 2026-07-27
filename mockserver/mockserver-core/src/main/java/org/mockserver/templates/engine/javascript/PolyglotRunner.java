@@ -16,6 +16,7 @@ import org.mockserver.templates.engine.TemplateFunctions;
 import org.mockserver.templates.engine.helpers.RequestBodyExtractionHelper;
 import org.mockserver.templates.engine.model.HttpRequestTemplateObject;
 import org.mockserver.templates.engine.model.HttpResponseTemplateObject;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.mockserver.templates.engine.serializer.HttpTemplateOutputDeserializer;
 import org.slf4j.event.Level;
 
@@ -66,14 +67,18 @@ final class PolyglotRunner {
         Class<? extends DTO<T>> dtoClass,
         long executionTimeoutMillis,
         boolean rawText,
-        Object fakerOverride
+        Object fakerOverride,
+        WebSocketFrameContext frame
     ) {
         // rawText (streaming payload templating): coerce the handle(request) return value to text — a
         // returned string is emitted verbatim, any other value is JSON.stringify'd — instead of always
         // JSON.stringify'ing and then deserialising into a response object. rawText always implies the
-        // no-response (single-argument) template shape.
+        // no-response (single-argument) template shape, unless a frame is present (WebSocket matcher-
+        // response templating), in which case handle(request, frame) receives the inbound frame too.
         String serialiseFunction;
-        if (rawText) {
+        if (rawText && frame != null) {
+            serialiseFunction = " function serialise(request, frame) { var r = handle(JSON.parse(request), JSON.parse(frame)); return (r === null || r === undefined) ? '' : ((typeof r === 'string') ? r : JSON.stringify(r)); }";
+        } else if (rawText) {
             serialiseFunction = " function serialise(request) { var r = handle(JSON.parse(request)); return (r === null || r === undefined) ? '' : ((typeof r === 'string') ? r : JSON.stringify(r)); }";
         } else if (includeResponse) {
             serialiseFunction = " function serialise(request, response) { return JSON.stringify(handle(JSON.parse(request), JSON.parse(response)), null, 2); }";
@@ -117,7 +122,7 @@ final class PolyglotRunner {
             try {
                 return evaluate(
                     script, fullScript, includeResponse, request, response, iteration,
-                    objectMapper, mockServerLogger, httpTemplateOutputDeserializer, dtoClass, context, rawText, fakerOverride
+                    objectMapper, mockServerLogger, httpTemplateOutputDeserializer, dtoClass, context, rawText, fakerOverride, frame
                 );
             } catch (PolyglotException polyglotException) {
                 if (watchdogFired.get() && (polyglotException.isCancelled() || polyglotException.isInterrupted())) {
@@ -159,7 +164,8 @@ final class PolyglotRunner {
         Class<? extends DTO<T>> dtoClass,
         Context context,
         boolean rawText,
-        Object fakerOverride
+        Object fakerOverride,
+        WebSocketFrameContext frame
     ) {
         {
             // In GraalVM Polyglot, context.getBindings("js") returns the JavaScript global scope
@@ -187,7 +193,13 @@ final class PolyglotRunner {
             // Velocity engines. Registered as java.util.function.Function so GraalJS treats them as
             // callable JS functions. The "jsonPath"/"xPath" names are not used by BUILT_IN_FUNCTIONS or
             // BUILT_IN_HELPERS, so this does not shadow (or get shadowed by) a built-in.
-            RequestBodyExtractionHelper bodyExtractionHelper = new RequestBodyExtractionHelper(request, mockServerLogger);
+            // For WebSocket matcher-response templating (frame present with text), bind jsonPath/xPath to
+            // the inbound frame body so a response can extract from the frame that triggered the match; a
+            // binary-only frame (text null) and the no-frame case keep them bound to the real request.
+            HttpRequest extractionRequest = (frame != null && frame.getText() != null)
+                ? new HttpRequest().withBody(frame.getText())
+                : request;
+            RequestBodyExtractionHelper bodyExtractionHelper = new RequestBodyExtractionHelper(extractionRequest, mockServerLogger);
             jsBindings.putMember("jsonPath", (Function<String, Object>) bodyExtractionHelper::jsonPath);
             jsBindings.putMember("xPath", (Function<String, Object>) bodyExtractionHelper::xPath);
 
@@ -204,7 +216,21 @@ final class PolyglotRunner {
 
             Value serialiseFunc = jsBindings.getMember("serialise");
             Value stringifiedResult;
-            if (includeResponse) {
+            if (rawText && frame != null) {
+                // Pass the frame as a JSON string so JSON.parse(frame) yields a plain object whose
+                // members (frame.text, frame.turnIndex) are plain JS values; frame.text being a plain
+                // string is what lets a template do JSON.parse(frame.text) when the frame text is JSON.
+                String frameJson;
+                try {
+                    frameJson = objectMapper.writeValueAsString(frame);
+                } catch (Exception serialiseFrameException) {
+                    throw new RuntimeException(serialiseFrameException);
+                }
+                stringifiedResult = serialiseFunc.execute(
+                    new HttpRequestTemplateObject(request),
+                    frameJson
+                );
+            } else if (includeResponse) {
                 stringifiedResult = serialiseFunc.execute(
                     new HttpRequestTemplateObject(request),
                     new HttpResponseTemplateObject(response)

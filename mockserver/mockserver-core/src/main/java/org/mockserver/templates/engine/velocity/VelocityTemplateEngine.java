@@ -26,6 +26,7 @@ import org.mockserver.templates.engine.TemplateFunctions;
 import org.mockserver.templates.engine.helpers.RequestBodyExtractionHelper;
 import org.mockserver.templates.engine.model.HttpRequestTemplateObject;
 import org.mockserver.templates.engine.model.HttpResponseTemplateObject;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.mockserver.templates.engine.serializer.HttpTemplateOutputDeserializer;
 import org.mockserver.templates.engine.velocity.directives.Ifnull;
 import org.slf4j.event.Level;
@@ -433,6 +434,35 @@ public class VelocityTemplateEngine implements TemplateEngine {
                 context.put("iteration", iteration);
             }
             RequestBodyExtractionHelper bodyExtractionHelper = new RequestBodyExtractionHelper(request, mockServerLogger);
+            context.put("jsonPath", new RequestBodyExtractionHelper.JsonPathTool(bodyExtractionHelper));
+            context.put("xPath", new RequestBodyExtractionHelper.XPathTool(bodyExtractionHelper));
+            renderTemplate(holder, template, context, writer);
+            return writer.toString();
+        } catch (Exception e) {
+            throw new RuntimeException(formatLogMessage("Exception:{}transforming template:{}for request:{}", isNotBlank(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName(), template, request), e);
+        }
+    }
+
+    @Override
+    public String renderTemplateText(String template, HttpRequest request, WebSocketFrameContext frame) {
+        try {
+            validateTemplate(template);
+            // read the holder ONCE for the whole render so a concurrent rebuild cannot mix an old
+            // engine with a new tool context or repository
+            EngineHolder holder = currentEngineHolder();
+            Writer writer = new StringWriter();
+            // the "request" template variable stays bound to the real (upgrade) request
+            VelocityContext context = newRenderContext(holder, request);
+            if (frame != null) {
+                context.put("frame", frame);
+            }
+            // bind $jsonPath/$xPath to the inbound frame body when the frame carries text, so a matcher
+            // response can extract from the frame that triggered the match; a binary-only frame (text
+            // null) keeps them bound to the real request, as does the no-frame case
+            HttpRequest extractionRequest = (frame != null && frame.getText() != null)
+                ? new HttpRequest().withBody(frame.getText())
+                : request;
+            RequestBodyExtractionHelper bodyExtractionHelper = new RequestBodyExtractionHelper(extractionRequest, mockServerLogger);
             context.put("jsonPath", new RequestBodyExtractionHelper.JsonPathTool(bodyExtractionHelper));
             context.put("xPath", new RequestBodyExtractionHelper.XPathTool(bodyExtractionHelper));
             renderTemplate(holder, template, context, writer);

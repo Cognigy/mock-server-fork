@@ -5,6 +5,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpTemplate;
 import org.mockserver.templates.engine.TemplateEngine;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.mockserver.templates.engine.javascript.JavaScriptTemplateEngine;
 import org.mockserver.templates.engine.mustache.MustacheTemplateEngine;
 import org.mockserver.templates.engine.velocity.VelocityTemplateEngine;
@@ -46,10 +47,24 @@ public class StreamTemplateRenderer {
      * returned unchanged (static — no engine is created).
      */
     public String render(HttpTemplate.TemplateType templateType, String payload, HttpRequest request) {
+        return render(templateType, payload, request, null);
+    }
+
+    /**
+     * Renders {@code payload} as a response template of the given {@code templateType} against
+     * {@code request}, with the inbound WebSocket {@code frame} bound under the template variable
+     * {@code frame} (see {@link WebSocketFrameContext}). When {@code templateType} or {@code payload}
+     * is {@code null}, the payload is returned unchanged (static — no engine is created). When
+     * {@code frame} is {@code null} this is identical to {@link #render(HttpTemplate.TemplateType,
+     * String, HttpRequest)}: the {@code request} template variable always binds to {@code request}
+     * (the HTTP upgrade request), while {@code frame} exposes the inbound frame's contents and rebinds
+     * {@code jsonPath} / {@code xPath} to the frame body when the frame carries text.
+     */
+    public String render(HttpTemplate.TemplateType templateType, String payload, HttpRequest request, WebSocketFrameContext frame) {
         if (templateType == null || payload == null) {
             return payload;
         }
-        return engineFor(templateType).renderTemplateText(payload, request);
+        return engineFor(templateType).renderTemplateText(payload, request, frame);
     }
 
     private TemplateEngine engineFor(HttpTemplate.TemplateType templateType) {

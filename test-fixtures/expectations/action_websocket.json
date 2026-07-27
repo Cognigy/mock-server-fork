@@ -28,6 +28,7 @@
       }
     ],
     "closeConnection": true,
+    "closeCode": 4001,
     "delay": {
       "timeUnit": "MILLISECONDS",
       "value": 10

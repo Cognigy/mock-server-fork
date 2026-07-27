@@ -14,6 +14,7 @@ public class HttpWebSocketResponseDTO extends ObjectWithReflectiveEqualsHashCode
     private List<WebSocketMessageModelDTO> messages;
     private List<WebSocketMessageMatcherDTO> matchers;
     private Boolean closeConnection;
+    private Integer closeCode;
     private GraphQLBodyDTO graphqlSubscriptionFilter;
     private HttpTemplate.TemplateType templateType;
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
@@ -26,6 +27,7 @@ public class HttpWebSocketResponseDTO extends ObjectWithReflectiveEqualsHashCode
             }
             subprotocol = httpWebSocketResponse.getSubprotocol();
             closeConnection = httpWebSocketResponse.getCloseConnection();
+            closeCode = httpWebSocketResponse.getCloseCode();
             if (httpWebSocketResponse.getMessages() != null) {
                 messages = new ArrayList<>();
                 httpWebSocketResponse.getMessages().forEach(message -> messages.add(new WebSocketMessageModelDTO(message)));
@@ -50,6 +52,7 @@ public class HttpWebSocketResponseDTO extends ObjectWithReflectiveEqualsHashCode
             .withDelay(delay != null ? delay.buildObject() : null)
             .withSubprotocol(subprotocol)
             .withCloseConnection(closeConnection)
+            .withCloseCode(closeCode)
             .withTemplateType(templateType)
             .withPrimary(primary);
         if (messages != null) {
@@ -106,6 +109,15 @@ public class HttpWebSocketResponseDTO extends ObjectWithReflectiveEqualsHashCode
 
     public HttpWebSocketResponseDTO setCloseConnection(Boolean closeConnection) {
         this.closeConnection = closeConnection;
+        return this;
+    }
+
+    public Integer getCloseCode() {
+        return closeCode;
+    }
+
+    public HttpWebSocketResponseDTO setCloseCode(Integer closeCode) {
+        this.closeCode = closeCode;
         return this;
     }
 

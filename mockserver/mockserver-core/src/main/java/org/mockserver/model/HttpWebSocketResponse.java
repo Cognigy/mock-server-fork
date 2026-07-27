@@ -10,6 +10,7 @@ public class HttpWebSocketResponse extends Action<HttpWebSocketResponse> {
     private List<WebSocketMessage> messages;
     private List<WebSocketMessageMatcher> matchers;
     private Boolean closeConnection;
+    private Integer closeCode;
     private GraphQLBody graphqlSubscriptionFilter;
     private HttpTemplate.TemplateType templateType;
 
@@ -88,6 +89,23 @@ public class HttpWebSocketResponse extends Action<HttpWebSocketResponse> {
     }
 
     /**
+     * WebSocket close status code the server sends when it closes the connection (via
+     * {@link #withCloseConnection(Boolean) closeConnection}, an exhausted sequential matcher configured with
+     * {@link WebSocketOnExhausted#CLOSE}, or a breakpoint CLOSE action). When {@code null} (the default) the
+     * server closes with 1000 (normal closure). Values must be valid per RFC 6455 — 1000, 1001, 1003, 1007–1011,
+     * or an application-defined code in the 3000–4999 range; an invalid code falls back to 1000 at send time.
+     */
+    public HttpWebSocketResponse withCloseCode(Integer closeCode) {
+        this.closeCode = closeCode;
+        this.hashCode = 0;
+        return this;
+    }
+
+    public Integer getCloseCode() {
+        return closeCode;
+    }
+
+    /**
      * Set a GraphQL subscription filter for the graphql-transport-ws protocol.
      * When the negotiated subprotocol is {@code graphql-transport-ws} or {@code graphql-ws},
      * incoming {@code subscribe} messages will have their query matched against this filter.
@@ -153,6 +171,7 @@ public class HttpWebSocketResponse extends Action<HttpWebSocketResponse> {
             Objects.equals(messages, that.messages) &&
             Objects.equals(matchers, that.matchers) &&
             Objects.equals(closeConnection, that.closeConnection) &&
+            Objects.equals(closeCode, that.closeCode) &&
             Objects.equals(graphqlSubscriptionFilter, that.graphqlSubscriptionFilter) &&
             templateType == that.templateType;
     }
@@ -160,7 +179,7 @@ public class HttpWebSocketResponse extends Action<HttpWebSocketResponse> {
     @Override
     public int hashCode() {
         if (hashCode == 0) {
-            hashCode = Objects.hash(super.hashCode(), subprotocol, messages, matchers, closeConnection, graphqlSubscriptionFilter, templateType);
+            hashCode = Objects.hash(super.hashCode(), subprotocol, messages, matchers, closeConnection, closeCode, graphqlSubscriptionFilter, templateType);
         }
         return hashCode;
     }

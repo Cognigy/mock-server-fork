@@ -10,6 +10,7 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.serialization.ObjectMapperFactory;
 import org.mockserver.serialization.model.DTO;
 import org.mockserver.templates.engine.TemplateEngine;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.mockserver.templates.engine.serializer.HttpTemplateOutputDeserializer;
 import org.slf4j.event.Level;
 
@@ -196,7 +197,49 @@ public class JavaScriptTemplateEngine implements TemplateEngine {
                 null,
                 executionTimeout == null ? 0L : executionTimeout,
                 true,
-                seededFaker
+                seededFaker,
+                null
+            );
+        } catch (JavaScriptTemplateTimeoutException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException(formatLogMessage("Exception:{}transforming template:{}for request:{}", isNotBlank(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName(), template, request), e);
+        }
+    }
+
+    /**
+     * Streaming WebSocket matcher-response templating with the inbound frame bound under {@code frame}.
+     * The template is wrapped as {@code function handle(request, frame)}; {@code request} stays bound to
+     * the HTTP upgrade request, while {@code frame} is the serialised {@link WebSocketFrameContext} so
+     * {@code frame.text} is a plain string (and {@code JSON.parse(frame.text)} works when the frame text
+     * is itself JSON). When {@code frame} is {@code null} this is identical to the two-arg
+     * {@link #renderTemplateText(String, HttpRequest)}.
+     */
+    @Override
+    public String renderTemplateText(String template, HttpRequest request, WebSocketFrameContext frame) {
+        if (frame == null) {
+            return renderTemplateText(template, request);
+        }
+        assertPolyglotAvailable(request);
+        String script = wrapTemplateWithFrame(template);
+        try {
+            validateTemplate(template);
+            Long executionTimeout = configuration.javascriptTemplateExecutionTimeout();
+            return PolyglotRunner.run(
+                script,
+                false,
+                request,
+                null,
+                null,
+                classFilter,
+                objectMapper,
+                mockServerLogger,
+                httpTemplateOutputDeserializer,
+                null,
+                executionTimeout == null ? 0L : executionTimeout,
+                true,
+                seededFaker,
+                frame
             );
         } catch (JavaScriptTemplateTimeoutException e) {
             throw e;
@@ -250,7 +293,8 @@ public class JavaScriptTemplateEngine implements TemplateEngine {
                 dtoClass,
                 executionTimeout == null ? 0L : executionTimeout,
                 false,
-                seededFaker
+                seededFaker,
+                null
             );
         } catch (JavaScriptTemplateTimeoutException e) {
             // Surface the timeout as-is (with its clear, already-logged message) rather than wrapping
@@ -267,6 +311,10 @@ public class JavaScriptTemplateEngine implements TemplateEngine {
 
     static String wrapTemplateWithResponse(String template) {
         return "function handle(request, response) {" + indentAndToString(template)[0] + "}";
+    }
+
+    static String wrapTemplateWithFrame(String template) {
+        return "function handle(request, frame) {" + indentAndToString(template)[0] + "}";
     }
 
     private void validateTemplate(String template) {

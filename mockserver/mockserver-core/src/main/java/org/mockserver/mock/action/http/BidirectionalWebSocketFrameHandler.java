@@ -1,5 +1,6 @@
 package org.mockserver.mock.action.http;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -11,10 +12,14 @@ import org.mockserver.mock.breakpoint.StreamFrameBreakpointRegistry;
 import org.mockserver.model.WebSocketFrameType;
 import org.mockserver.model.WebSocketMessage;
 import org.mockserver.model.WebSocketMessageMatcher;
+import org.mockserver.model.WebSocketOnExhausted;
+import org.mockserver.templates.engine.model.WebSocketFrameContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.PatternSyntaxException;
 
 /**
@@ -38,6 +43,15 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
 
     private final List<WebSocketMessageMatcher> matchers;
     private final FrameSender frameSender;
+    private final ConnectionCloser connectionCloser;
+
+    /**
+     * Per-connection turn cursors, one slot per matcher (parallel to {@link #matchers}). Only used by
+     * matchers configured with {@link WebSocketMessageMatcher#getTurns() turns}. This handler is
+     * instantiated once per WebSocket connection and every frame is processed on that connection's single
+     * event-loop thread, so no synchronization is required; the state dies with the handler on close.
+     */
+    private final int[] turnCursors;
 
     // Inbound breakpoint fields — null when inbound breakpoints are disabled
     private final Configuration configuration;
@@ -50,9 +64,37 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
 
     /**
      * Callback interface for sending response frames to the client.
+     *
+     * <p>The single abstract method carries the inbound {@link WebSocketFrameContext frameContext} that
+     * triggered the match (so a templated response can echo the frame) and an {@code onSent} callback
+     * (nullable) invoked exactly once after the frame reaches a terminal outcome — this is how an
+     * exhausted {@link WebSocketOnExhausted#CLOSE} matcher closes only after its final turn's frames have
+     * all flushed.
      */
+    @FunctionalInterface
     public interface FrameSender {
-        void send(ChannelHandlerContext ctx, WebSocketMessage message);
+        void send(ChannelHandlerContext ctx, WebSocketMessage message, WebSocketFrameContext frameContext, Runnable onSent);
+
+        /**
+         * Legacy 2-arg convenience that sends without frame context or completion callback.
+         *
+         * @deprecated use {@link #send(ChannelHandlerContext, WebSocketMessage, WebSocketFrameContext, Runnable)}
+         */
+        @Deprecated
+        default void send(ChannelHandlerContext ctx, WebSocketMessage message) {
+            send(ctx, message, null, null);
+        }
+    }
+
+    /**
+     * Callback interface for closing the connection when a sequential matcher exhausts its turns with
+     * {@link WebSocketOnExhausted#CLOSE}. Supplied by {@code HttpWebSocketResponseActionHandler} so the
+     * close honours the configured {@code closeCode}; when {@code null} the handler falls back to
+     * {@link ChannelHandlerContext#close()}.
+     */
+    @FunctionalInterface
+    public interface ConnectionCloser {
+        void close(ChannelHandlerContext ctx);
     }
 
     /**
@@ -74,7 +116,21 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
     }
 
     /**
-     * Constructor with inbound breakpoint support and pre-resolved breakpoint identity.
+     * Constructor with inbound breakpoint support and pre-resolved breakpoint identity, but no
+     * {@link ConnectionCloser} (falls back to {@link ChannelHandlerContext#close()} for turn-exhausted
+     * {@link WebSocketOnExhausted#CLOSE}).
+     */
+    public BidirectionalWebSocketFrameHandler(List<WebSocketMessageMatcher> matchers, FrameSender frameSender,
+                                              Configuration configuration, String inboundStreamId,
+                                              WebSocketClientRegistry webSocketClientRegistry,
+                                              String inboundBreakpointClientId, String inboundBreakpointId) {
+        this(matchers, frameSender, configuration, inboundStreamId, webSocketClientRegistry,
+            inboundBreakpointClientId, inboundBreakpointId, null);
+    }
+
+    /**
+     * Constructor with inbound breakpoint support, pre-resolved breakpoint identity and a
+     * {@link ConnectionCloser}.
      *
      * @param matchers                   the matcher list for bidirectional matching
      * @param frameSender                callback for sending response frames
@@ -83,14 +139,18 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
      * @param webSocketClientRegistry    the per-server WS registry for callback dispatch (null to disable WS dispatch)
      * @param inboundBreakpointClientId  the matched inbound breakpoint's owning clientId (from outer caller)
      * @param inboundBreakpointId        the matched inbound breakpoint's id (from outer caller)
+     * @param connectionCloser           closes the connection for turn-exhausted CLOSE (null → {@code ctx.close()})
      */
     public BidirectionalWebSocketFrameHandler(List<WebSocketMessageMatcher> matchers, FrameSender frameSender,
                                               Configuration configuration, String inboundStreamId,
                                               WebSocketClientRegistry webSocketClientRegistry,
-                                              String inboundBreakpointClientId, String inboundBreakpointId) {
+                                              String inboundBreakpointClientId, String inboundBreakpointId,
+                                              ConnectionCloser connectionCloser) {
         super(false); // don't auto-release frames — retain for pass-through if unmatched
         this.matchers = matchers;
         this.frameSender = frameSender;
+        this.connectionCloser = connectionCloser;
+        this.turnCursors = new int[matchers != null ? matchers.size() : 0];
         this.configuration = configuration;
         this.inboundStreamId = inboundStreamId;
         this.webSocketClientRegistry = webSocketClientRegistry;
@@ -202,13 +262,10 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
         }
 
         // --- Default path (no inbound breakpoints) ---
-        for (WebSocketMessageMatcher matcher : matchers) {
+        for (int i = 0; i < matchers.size(); i++) {
+            WebSocketMessageMatcher matcher = matchers.get(i);
             if (matches(matcher, frame)) {
-                if (matcher.getResponses() != null) {
-                    for (WebSocketMessage response : matcher.getResponses()) {
-                        frameSender.send(ctx, response);
-                    }
-                }
+                emitForMatch(ctx, i, matcher, buildFrameContext(frame));
                 frame.release();
                 return; // first match wins
             }
@@ -225,13 +282,10 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
                                      boolean isBinary, boolean isText, boolean isPing, boolean isPong) {
         WebSocketFrame reconstructed = reconstructFrame(frameBytes, isBinary, isText, isPing, isPong);
         try {
-            for (WebSocketMessageMatcher matcher : matchers) {
+            for (int i = 0; i < matchers.size(); i++) {
+                WebSocketMessageMatcher matcher = matchers.get(i);
                 if (matches(matcher, reconstructed)) {
-                    if (matcher.getResponses() != null) {
-                        for (WebSocketMessage response : matcher.getResponses()) {
-                            frameSender.send(ctx, response);
-                        }
-                    }
+                    emitForMatch(ctx, i, matcher, buildFrameContext(reconstructed));
                     return; // first match wins
                 }
             }
@@ -240,6 +294,115 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
         } finally {
             reconstructed.release();
         }
+    }
+
+    /**
+     * Shared emission for a matched inbound frame. Classic matchers (no {@code turns}) send every
+     * configured response; sequential matchers ({@code turns} present) advance a per-connection cursor:
+     * <ul>
+     *   <li>cursor still within the sequence — emit that turn's frames (each carrying
+     *       {@code turnIndex == cursor}) and advance; if this was the final turn and {@code onExhausted}
+     *       is {@link WebSocketOnExhausted#CLOSE}, close once every frame of the turn has flushed
+     *       (immediately for an empty final turn);</li>
+     *   <li>cursor past the end (exhausted) — {@link WebSocketOnExhausted#REPEAT} wraps to turn 0 and
+     *       emits it (the normal rule then applies, leaving the cursor at 1); anything else
+     *       ({@link WebSocketOnExhausted#IGNORE} or {@code null}) consumes the frame silently.</li>
+     * </ul>
+     * In every {@code turns} case the frame is consumed by first-match-wins — there is no fall-through
+     * to later matchers or the pipeline.
+     */
+    private void emitForMatch(ChannelHandlerContext ctx, int matcherIndex,
+                              WebSocketMessageMatcher matcher, WebSocketFrameContext frameContext) {
+        List<List<WebSocketMessage>> turns = matcher.getTurns();
+        if (turns == null) {
+            // Classic mode: send every configured response, unchanged apart from the added frame context.
+            if (matcher.getResponses() != null) {
+                for (WebSocketMessage response : matcher.getResponses()) {
+                    frameSender.send(ctx, response, frameContext, null);
+                }
+            }
+            return;
+        }
+
+        // Sequential mode: cursor machine.
+        int cursor = turnCursors[matcherIndex];
+        if (cursor >= turns.size()) {
+            // Exhausted.
+            if (matcher.getOnExhausted() == WebSocketOnExhausted.REPEAT && !turns.isEmpty()) {
+                cursor = 0; // wrap and fall through to the normal emit rule
+            } else {
+                return; // IGNORE / null (or CLOSE already fired) — consume silently
+            }
+        }
+
+        List<WebSocketMessage> turn = turns.get(cursor);
+        boolean closeAfter = cursor == turns.size() - 1
+            && matcher.getOnExhausted() == WebSocketOnExhausted.CLOSE;
+        emitTurn(ctx, turn, cursor, closeAfter, frameContext);
+        turnCursors[matcherIndex] = cursor + 1;
+    }
+
+    /**
+     * Emit a single turn's frames. When {@code closeAfter} is set the connection is closed once every
+     * frame in the turn has flushed (tracked by an {@link AtomicInteger} countdown over {@code onSent}),
+     * or immediately when the turn is empty.
+     */
+    private void emitTurn(ChannelHandlerContext ctx, List<WebSocketMessage> turn, int turnIndex,
+                          boolean closeAfter, WebSocketFrameContext frameContext) {
+        WebSocketFrameContext turnContext = withTurnIndex(frameContext, turnIndex);
+        if (turn == null || turn.isEmpty()) {
+            if (closeAfter) {
+                closeConnection(ctx);
+            }
+            return;
+        }
+        if (closeAfter) {
+            AtomicInteger remaining = new AtomicInteger(turn.size());
+            for (WebSocketMessage message : turn) {
+                frameSender.send(ctx, message, turnContext, () -> {
+                    if (remaining.decrementAndGet() == 0) {
+                        closeConnection(ctx);
+                    }
+                });
+            }
+        } else {
+            for (WebSocketMessage message : turn) {
+                frameSender.send(ctx, message, turnContext, null);
+            }
+        }
+    }
+
+    private void closeConnection(ChannelHandlerContext ctx) {
+        if (connectionCloser != null) {
+            connectionCloser.close(ctx);
+        } else {
+            ctx.close();
+        }
+    }
+
+    private static WebSocketFrameContext withTurnIndex(WebSocketFrameContext frameContext, int turnIndex) {
+        return new WebSocketFrameContext(
+            frameContext != null ? frameContext.getText() : null,
+            frameContext != null ? frameContext.getBinaryBase64() : null,
+            turnIndex);
+    }
+
+    /**
+     * Build the per-frame template context from the matched inbound frame: a TEXT frame populates
+     * {@code text}; a BINARY frame populates {@code binaryBase64} with the Base64-encoded payload. The
+     * frame's reader index is not advanced (a defensive copy is taken for binary content).
+     */
+    private static WebSocketFrameContext buildFrameContext(WebSocketFrame frame) {
+        if (frame instanceof TextWebSocketFrame textFrame) {
+            return new WebSocketFrameContext(textFrame.text(), null, null);
+        }
+        if (frame instanceof BinaryWebSocketFrame binaryFrame) {
+            ByteBuf content = binaryFrame.content();
+            byte[] bytes = new byte[content.readableBytes()];
+            content.getBytes(content.readerIndex(), bytes);
+            return new WebSocketFrameContext(null, Base64.getEncoder().encodeToString(bytes), null);
+        }
+        return new WebSocketFrameContext(null, null, null);
     }
 
     /**

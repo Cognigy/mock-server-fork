@@ -1167,4 +1167,75 @@ public class JsonSchemaExpectationValidatorTest {
             "  }" + NEW_LINE +
             "}"), is(not("")));
     }
+
+    @Test
+    public void shouldValidateWebSocketResponseWithSequentialTurnsOnExhaustedAndCloseCode() {
+        // when — a sequential matcher (turns, incl. an empty turn), onExhausted and a top-level closeCode validate
+        assertThat(jsonSchemaValidator.isValid("{" + NEW_LINE +
+            "  \"httpRequest\" : {" + NEW_LINE +
+            "    \"path\" : \"/ws\"" + NEW_LINE +
+            "  }," + NEW_LINE +
+            "  \"httpWebSocketResponse\" : {" + NEW_LINE +
+            "    \"closeCode\" : 4001," + NEW_LINE +
+            "    \"matchers\" : [ {" + NEW_LINE +
+            "      \"textMatcher\" : \".*verb:hook.*\"," + NEW_LINE +
+            "      \"onExhausted\" : \"CLOSE\"," + NEW_LINE +
+            "      \"turns\" : [ [ {" + NEW_LINE +
+            "        \"text\" : \"ack-1\"" + NEW_LINE +
+            "      } ], [ {" + NEW_LINE +
+            "        \"text\" : \"ack-2\"" + NEW_LINE +
+            "      } ], [ ] ]" + NEW_LINE +
+            "    } ]" + NEW_LINE +
+            "  }" + NEW_LINE +
+            "}"), is(""));
+    }
+
+    @Test
+    public void shouldRejectWebSocketMatcherWithBothResponsesAndTurns() {
+        // when — responses and turns are mutually exclusive ("not": {"required": ["responses","turns"]})
+        assertThat(jsonSchemaValidator.isValid("{" + NEW_LINE +
+            "  \"httpRequest\" : {" + NEW_LINE +
+            "    \"path\" : \"/ws\"" + NEW_LINE +
+            "  }," + NEW_LINE +
+            "  \"httpWebSocketResponse\" : {" + NEW_LINE +
+            "    \"matchers\" : [ {" + NEW_LINE +
+            "      \"textMatcher\" : \"ping\"," + NEW_LINE +
+            "      \"responses\" : [ {" + NEW_LINE +
+            "        \"text\" : \"pong\"" + NEW_LINE +
+            "      } ]," + NEW_LINE +
+            "      \"turns\" : [ [ {" + NEW_LINE +
+            "        \"text\" : \"pong\"" + NEW_LINE +
+            "      } ] ]" + NEW_LINE +
+            "    } ]" + NEW_LINE +
+            "  }" + NEW_LINE +
+            "}"), is(not("")));
+    }
+
+    @Test
+    public void shouldRejectWebSocketMatcherWithUnknownOnExhausted() {
+        assertThat(jsonSchemaValidator.isValid("{" + NEW_LINE +
+            "  \"httpRequest\" : {" + NEW_LINE +
+            "    \"path\" : \"/ws\"" + NEW_LINE +
+            "  }," + NEW_LINE +
+            "  \"httpWebSocketResponse\" : {" + NEW_LINE +
+            "    \"matchers\" : [ {" + NEW_LINE +
+            "      \"textMatcher\" : \"ping\"," + NEW_LINE +
+            "      \"onExhausted\" : \"NOT_A_REAL_MODE\"," + NEW_LINE +
+            "      \"turns\" : [ [ ] ]" + NEW_LINE +
+            "    } ]" + NEW_LINE +
+            "  }" + NEW_LINE +
+            "}"), is(not("")));
+    }
+
+    @Test
+    public void shouldRejectWebSocketResponseWithCloseCodeOutOfRange() {
+        assertThat(jsonSchemaValidator.isValid("{" + NEW_LINE +
+            "  \"httpRequest\" : {" + NEW_LINE +
+            "    \"path\" : \"/ws\"" + NEW_LINE +
+            "  }," + NEW_LINE +
+            "  \"httpWebSocketResponse\" : {" + NEW_LINE +
+            "    \"closeCode\" : 999" + NEW_LINE +
+            "  }" + NEW_LINE +
+            "}"), is(not("")));
+    }
 }

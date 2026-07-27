@@ -82,7 +82,7 @@ public class InboundBreakpointTest {
         List<WebSocketMessage> sentMessages = new ArrayList<>();
         BidirectionalWebSocketFrameHandler handler = new BidirectionalWebSocketFrameHandler(
             List.of(webSocketMessageMatcher().withText("ping").withResponses(webSocketMessage("pong"))),
-            (ctx, msg) -> sentMessages.add(msg),
+            (ctx, msg, frameContext, onSent) -> sentMessages.add(msg),
             config,
             streamId,
             null

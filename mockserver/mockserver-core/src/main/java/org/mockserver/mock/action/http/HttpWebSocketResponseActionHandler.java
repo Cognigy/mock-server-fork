@@ -121,7 +121,7 @@ public class HttpWebSocketResponseActionHandler {
                             inboundBreakpointMatcher != null ? inboundBreakpointMatcher.getClientId() : null,
                             inboundBreakpointMatcher != null ? inboundBreakpointMatcher.getId() : null);
                     } else {
-                        installBidirectionalHandler(ctx, httpWebSocketResponse, handshaker,
+                        installBidirectionalHandler(ctx, httpWebSocketResponse, request, handshaker,
                             streamBreakpointsActive, streamId, reqMethod, reqPath, inboundStreamId,
                             useWsDispatch, breakpointClientId,
                             streamBreakpointMatcher != null ? streamBreakpointMatcher.getId() : null,
@@ -159,10 +159,38 @@ public class HttpWebSocketResponseActionHandler {
     /**
      * A 1000 NORMAL_CLOSURE frame. An empty close frame (no status code) is legal but leaves the
      * client reporting close code 1005 "no status received", which several clients treat as an
-     * abnormal termination.
+     * abnormal termination. Used by the GraphQL subscription path, which always closes with 1000.
      */
     private static CloseWebSocketFrame normalClosure() {
         return new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE);
+    }
+
+    /**
+     * The close frame the server sends when it closes a mocked WebSocket. When the response carries no
+     * {@code closeCode} (the default) this is a 1000 NORMAL_CLOSURE frame — an empty close frame (no
+     * status code) is legal but leaves the client reporting close code 1005 "no status received", which
+     * several clients treat as an abnormal termination. When a {@code closeCode} is configured it is sent
+     * verbatim (with an empty reason) if valid per RFC 6455 ({@link WebSocketCloseStatus#isValidStatusCode(int)},
+     * which admits 1000–1003, 1007–1011 and the application range 3000–4999); an invalid code is logged
+     * at WARN and falls back to 1000.
+     */
+    private CloseWebSocketFrame closeFrame(HttpWebSocketResponse httpWebSocketResponse) {
+        Integer closeCode = httpWebSocketResponse.getCloseCode();
+        if (closeCode == null) {
+            return new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE);
+        }
+        if (!WebSocketCloseStatus.isValidStatusCode(closeCode)) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("invalid WebSocket closeCode {} - falling back to 1000 (normal closure)")
+                        .setArguments(closeCode)
+                );
+            }
+            return new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE);
+        }
+        return new CloseWebSocketFrame(closeCode, "");
     }
 
     /**
@@ -403,7 +431,7 @@ public class HttpWebSocketResponseActionHandler {
         }
         if (ctx.channel().isActive()) {
             if (httpWebSocketResponse.getCloseConnection() == null || httpWebSocketResponse.getCloseConnection()) {
-                handshaker.close(ctx.channel(), normalClosure());
+                handshaker.close(ctx.channel(), closeFrame(httpWebSocketResponse));
             }
         }
     }
@@ -519,6 +547,7 @@ public class HttpWebSocketResponseActionHandler {
     }
 
     private void installBidirectionalHandler(ChannelHandlerContext ctx, HttpWebSocketResponse httpWebSocketResponse,
+                                             org.mockserver.model.HttpRequest request,
                                              WebSocketServerHandshaker handshaker,
                                              boolean streamBreakpointsActive, String streamId,
                                              String reqMethod, String reqPath,
@@ -528,8 +557,9 @@ public class HttpWebSocketResponseActionHandler {
                                              String inboundBreakpointClientId, String inboundBreakpointIdParam) {
         List<WebSocketMessageMatcher> matchers = httpWebSocketResponse.getMatchers();
         if (matchers != null && !matchers.isEmpty()) {
-            BidirectionalWebSocketFrameHandler.FrameSender frameSender = (senderCtx, message) -> {
+            BidirectionalWebSocketFrameHandler.FrameSender frameSender = (senderCtx, message, frameContext, onSent) -> {
                 if (!senderCtx.channel().isActive()) {
+                    invokeOnSent(onSent);
                     return;
                 }
                 byte[] frameBytes;
@@ -538,9 +568,33 @@ public class HttpWebSocketResponseActionHandler {
                     frameBytes = message.getBinary();
                     isBinary = true;
                 } else if (message.getText() != null) {
-                    frameBytes = message.getText().getBytes(StandardCharsets.UTF_8);
+                    // Opt-in templating: render the text payload with the inbound frame bound under
+                    // {@code frame} (so a response can echo the frame's contents) when a templateType is
+                    // set. Rendering happens before breakpoint dispatch so interception observes the
+                    // rendered bytes. A render failure never kills the connection — warn and send raw.
+                    String text = message.getText();
+                    if (httpWebSocketResponse.getTemplateType() != null) {
+                        try {
+                            text = templateRenderer.render(httpWebSocketResponse.getTemplateType(), message.getText(), request, frameContext);
+                        } catch (Exception e) {
+                            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                                mockServerLogger.logEvent(
+                                    new LogEntry()
+                                        .setLogLevel(Level.WARN)
+                                        .setCorrelationId(request.getLogCorrelationId())
+                                        .setHttpRequest(request)
+                                        .setMessageFormat("exception rendering WebSocket matcher response template for request:{} - sending raw text")
+                                        .setArguments(request)
+                                        .setThrowable(e)
+                                );
+                            }
+                            text = message.getText();
+                        }
+                    }
+                    frameBytes = text.getBytes(StandardCharsets.UTF_8);
                     isBinary = false;
                 } else {
+                    invokeOnSent(onSent);
                     return;
                 }
 
@@ -561,7 +615,7 @@ public class HttpWebSocketResponseActionHandler {
                             WebSocketFrame frame = isBinary
                                 ? new BinaryWebSocketFrame(Unpooled.wrappedBuffer(frameBytes))
                                 : new TextWebSocketFrame(Unpooled.wrappedBuffer(frameBytes));
-                            senderCtx.writeAndFlush(frame);
+                            senderCtx.writeAndFlush(frame).addListener(f -> invokeOnSent(onSent));
                             return;
                         }
 
@@ -570,6 +624,7 @@ public class HttpWebSocketResponseActionHandler {
                         decisionFuture.thenAccept(decision ->
                             senderCtx.channel().eventLoop().execute(() -> {
                                 if (!senderCtx.channel().isActive()) {
+                                    invokeOnSent(onSent);
                                     return;
                                 }
                                 switch (decision.getAction()) {
@@ -577,15 +632,15 @@ public class HttpWebSocketResponseActionHandler {
                                         WebSocketFrame f = finalIsBinary
                                             ? new BinaryWebSocketFrame(Unpooled.wrappedBuffer(capturedBytes))
                                             : new TextWebSocketFrame(Unpooled.wrappedBuffer(capturedBytes));
-                                        senderCtx.writeAndFlush(f);
+                                        senderCtx.writeAndFlush(f).addListener(l -> invokeOnSent(onSent));
                                     }
                                     case MODIFY -> {
                                         WebSocketFrame f = finalIsBinary
                                             ? new BinaryWebSocketFrame(Unpooled.wrappedBuffer(decision.getReplacementBody()))
                                             : new TextWebSocketFrame(Unpooled.wrappedBuffer(decision.getReplacementBody()));
-                                        senderCtx.writeAndFlush(f);
+                                        senderCtx.writeAndFlush(f).addListener(l -> invokeOnSent(onSent));
                                     }
-                                    case DROP -> { /* discard -- do not write */ }
+                                    case DROP -> invokeOnSent(onSent); // discard -- do not write, but still complete
                                     case INJECT -> {
                                         WebSocketFrame orig = finalIsBinary
                                             ? new BinaryWebSocketFrame(Unpooled.wrappedBuffer(capturedBytes))
@@ -595,15 +650,18 @@ public class HttpWebSocketResponseActionHandler {
                                                 WebSocketFrame inj = finalIsBinary
                                                     ? new BinaryWebSocketFrame(Unpooled.wrappedBuffer(decision.getInjectedBody()))
                                                     : new TextWebSocketFrame(Unpooled.wrappedBuffer(decision.getInjectedBody()));
-                                                senderCtx.writeAndFlush(inj);
+                                                senderCtx.writeAndFlush(inj).addListener(f2 -> invokeOnSent(onSent));
+                                            } else {
+                                                invokeOnSent(onSent);
                                             }
                                         });
                                     }
                                     case CLOSE -> {
                                         StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
                                         if (handshaker != null) {
-                                            handshaker.close(senderCtx.channel(), normalClosure());
+                                            handshaker.close(senderCtx.channel(), closeFrame(httpWebSocketResponse));
                                         }
+                                        invokeOnSent(onSent);
                                     }
                                 }
                             })
@@ -616,6 +674,7 @@ public class HttpWebSocketResponseActionHandler {
                                         .setArguments(streamId, ex.getMessage())
                                 );
                             }
+                            senderCtx.channel().eventLoop().execute(() -> invokeOnSent(onSent));
                             return null;
                         });
                     };
@@ -624,7 +683,7 @@ public class HttpWebSocketResponseActionHandler {
                         WebSocketFrame frame = isBinary
                             ? new BinaryWebSocketFrame(Unpooled.copiedBuffer(frameBytes))
                             : new TextWebSocketFrame(Unpooled.wrappedBuffer(frameBytes));
-                        senderCtx.writeAndFlush(frame);
+                        senderCtx.writeAndFlush(frame).addListener(f -> invokeOnSent(onSent));
                     };
                 }
 
@@ -635,9 +694,23 @@ public class HttpWebSocketResponseActionHandler {
                     writeAction.run();
                 }
             };
+            BidirectionalWebSocketFrameHandler.ConnectionCloser connectionCloser =
+                c -> handshaker.close(c.channel(), closeFrame(httpWebSocketResponse));
             ctx.pipeline().addLast("bidirectionalWebSocketHandler",
                 new BidirectionalWebSocketFrameHandler(matchers, frameSender, configuration, inboundStreamId, webSocketClientRegistry,
-                    inboundBreakpointClientId, inboundBreakpointIdParam));
+                    inboundBreakpointClientId, inboundBreakpointIdParam, connectionCloser));
+        }
+    }
+
+    /**
+     * Invoke the frame-sent completion callback if present. The callback is null for classic
+     * (non-sequential) responses and non-final turns; it is non-null only when an exhausted
+     * {@link WebSocketOnExhausted#CLOSE} matcher must close after the final turn's frames have flushed,
+     * in which case it must run exactly once per frame so the countdown completes.
+     */
+    private static void invokeOnSent(Runnable onSent) {
+        if (onSent != null) {
+            onSent.run();
         }
     }
 

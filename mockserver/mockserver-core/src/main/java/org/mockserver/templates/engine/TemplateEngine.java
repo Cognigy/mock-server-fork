@@ -41,6 +41,26 @@ public interface TemplateEngine {
     }
 
     /**
+     * Renders a streaming-payload template against the request with an optional per-frame WebSocket
+     * variable injected under the key {@code "frame"}, returning the raw rendered text fragment. Used
+     * to template a WebSocket matcher response against the inbound frame that triggered the match: the
+     * {@code request} template variable keeps binding to the HTTP upgrade request, while {@code frame}
+     * exposes the inbound frame's contents (see
+     * {@link org.mockserver.templates.engine.model.WebSocketFrameContext}). When {@code frame} carries
+     * text, the {@code jsonPath} / {@code xPath} helpers bind to the frame body rather than the upgrade
+     * request body. When {@code frame} is {@code null} this is identical to
+     * {@link #renderTemplateText(String, HttpRequest)}. The default delegates to that method so engines
+     * that do not support the frame variable still render the request context unchanged.
+     *
+     * @param template    the template text
+     * @param httpRequest the request context (the HTTP upgrade request)
+     * @param frame       the per-frame variable, or {@code null} for no frame context
+     */
+    default String renderTemplateText(String template, HttpRequest httpRequest, org.mockserver.templates.engine.model.WebSocketFrameContext frame) {
+        return renderTemplateText(template, httpRequest);
+    }
+
+    /**
      * Renders a template against the request with an optional per-iteration load-scenario
      * variable injected under the key {@code "iteration"}, returning the raw rendered text.
      * Used only by the load-generation executor to vary a request step's fields per iteration

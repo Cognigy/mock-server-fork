@@ -197,6 +197,44 @@ public class HttpWebSocketResponseDTOTest {
     }
 
     @Test
+    public void shouldRoundTripCloseCode() {
+        HttpWebSocketResponse original = HttpWebSocketResponse.webSocketResponse()
+            .withCloseCode(4001);
+
+        HttpWebSocketResponseDTO dto = new HttpWebSocketResponseDTO(original);
+        assertThat(dto.getCloseCode(), is(4001));
+
+        HttpWebSocketResponse rebuilt = dto.buildObject();
+        assertThat(rebuilt.getCloseCode(), is(4001));
+    }
+
+    @Test
+    public void shouldRoundTripCloseCodeThroughJsonWire() throws Exception {
+        HttpWebSocketResponse original = HttpWebSocketResponse.webSocketResponse()
+            .withCloseCode(4001);
+
+        String json = ObjectMapperFactory.createObjectMapper()
+            .writeValueAsString(new HttpWebSocketResponseDTO(original));
+        HttpWebSocketResponse rebuilt = ObjectMapperFactory.createObjectMapper()
+            .readValue(json, HttpWebSocketResponseDTO.class).buildObject();
+
+        assertThat(rebuilt.getCloseCode(), is(4001));
+    }
+
+    @Test
+    public void shouldHaveNullCloseCodeByDefault() {
+        assertThat(new HttpWebSocketResponseDTO(HttpWebSocketResponse.webSocketResponse()).getCloseCode(), is(nullValue()));
+        assertThat(new HttpWebSocketResponseDTO(HttpWebSocketResponse.webSocketResponse()).buildObject().getCloseCode(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldReturnCloseCodeSetViaSetter() {
+        HttpWebSocketResponseDTO dto = new HttpWebSocketResponseDTO(null);
+        dto.setCloseCode(4002);
+        assertThat(dto.getCloseCode(), is(4002));
+    }
+
+    @Test
     public void shouldSetMatchersViaSetter() {
         WebSocketMessageMatcherDTO matcherDTO = new WebSocketMessageMatcherDTO();
         matcherDTO.setFrameType(WebSocketFrameType.TEXT);

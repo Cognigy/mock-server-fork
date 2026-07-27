@@ -65,7 +65,44 @@
                 }
               }
             }
+          },
+          "turns": {
+            "type": "array",
+            "description": "sequential turns; presence makes the matcher sequential (successive matches emit successive turns). Each turn is a list of frames to reply with; an empty inner array is a legal turn meaning matched-but-no-reply. Mutually exclusive with responses.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "binary": {
+                    "type": "string",
+                    "format": "byte"
+                  },
+                  "delay": {
+                    "$ref": "#/definitions/delay"
+                  }
+                }
+              }
+            }
+          },
+          "onExhausted": {
+            "description": "behaviour once every turn has been emitted on a connection; defaults to IGNORE",
+            "enum": [
+              "REPEAT",
+              "CLOSE",
+              "IGNORE"
+            ]
           }
+        },
+        "not": {
+          "required": [
+            "responses",
+            "turns"
+          ]
         }
       }
     },
@@ -78,6 +115,11 @@
     },
     "closeConnection": {
       "type": "boolean"
+    },
+    "closeCode": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 4999
     },
     "graphqlSubscriptionFilter": {
       "type": "object",

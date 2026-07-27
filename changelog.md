@@ -66,6 +66,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default-queue instances with margin.
 
 ### Added
+- **`httpWebSocketResponse` matcher responses can now be templated per inbound frame.** When the
+  action's top-level `templateType` (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`) is set, each `matchers[].responses[].text`
+  (and each `matchers[].turns[][].text`, see below) is rendered as a response template — previously only
+  the eagerly-pushed `messages[]` list was templated, and matcher responses were sent verbatim. Alongside
+  the existing `request.*` variable (still bound to the HTTP upgrade request), templates now see a `frame`
+  variable exposing the inbound frame that triggered the match — `frame.text` (TEXT frame payload),
+  `frame.binaryBase64` (Base64 of a BINARY frame), and `frame.turnIndex` (0-based turn index, null when
+  not sequential). When the matched frame carries text the `jsonPath`/`xPath` helpers operate on the
+  **frame body** rather than the upgrade request, so a mock can echo an inbound field — e.g. echo a
+  `msgid` back in an ack. A render failure warns and sends the raw text rather than dropping the
+  connection.
+- **`httpWebSocketResponse` matchers support sequential `turns` with an `onExhausted` policy.** A matcher's
+  new `turns` field (an array of arrays of frames) makes it sequential: successive matching frames on a
+  connection emit turn 0, then turn 1, and so on, instead of replying with the same `responses` every time.
+  An empty inner array is a legal turn meaning "matched, reply with nothing" (fire-and-forget). The cursor
+  is per-connection and dies when the connection closes. `onExhausted` (`REPEAT`/`CLOSE`/`IGNORE`, default
+  `IGNORE`) governs matches after the final turn: `IGNORE` consumes them silently, `REPEAT` wraps back to
+  turn 0, and `CLOSE` closes the connection once the final turn's frames have all flushed. `turns` and
+  `responses` are mutually exclusive (rejected by the schema).
+- **`httpWebSocketResponse` accepts a top-level `closeCode`.** When the server closes a mocked WebSocket —
+  via `closeConnection`, an exhausted `CLOSE` matcher, or a breakpoint CLOSE action — it now sends the
+  configured close code (integer 1000–4999) instead of always 1000. An invalid code is logged at WARN and
+  falls back to 1000 (normal closure). The GraphQL subscription path still closes with 1000.
 - **Clustered (Infinispan) expectation reload-on-startup is now proven end-to-end.** A new test
   (`ClusteredExpectationPersistenceReloadTest` in `mockserver-state-infinispan`) forms an in-JVM
   JGroups cluster consisting of a bare "fleet keeper" `InfinispanStateBackend` that stays up for the
@@ -1079,6 +1102,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asserted. No production behaviour changed.
 
 ### Changed
+- **A `httpWebSocketResponse` that sets `templateType` now renders its matcher responses instead of
+  sending them verbatim.** Previously `templateType` applied only to the eagerly-pushed `messages[]`
+  list; matcher `responses[].text` was always sent as-is. Now the same `templateType` also renders every
+  matcher response (and every `turns` frame) against the triggering request and inbound frame. An
+  expectation that sets `templateType` **and** relied on static matcher-response text is affected: with
+  `VELOCITY`/`MUSTACHE` static text without template directives renders back to itself, but **`JAVASCRIPT`
+  is a hazard** — static text is now executed as the body of a `handle(request, frame)` function, so any
+  matcher-response text that is not a valid JS template body will produce an empty (or unexpected) frame.
+  Such expectations must either drop `templateType` or convert the static text into a JS template that
+  returns it. Expectations without `templateType` are byte-for-byte unchanged.
 - **Editor and dashboard package lockfiles refreshed to clear three open advisories.** `dompurify`
   (`3.4.11` &rarr; `3.4.12`) in `mockserver-ui`, where the fix matters most: the dashboard renders
   captured request and response bodies it did not author, so a sanitiser bypass through

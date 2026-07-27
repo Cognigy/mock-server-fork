@@ -65,6 +65,33 @@ public class HttpWebSocketResponseTest {
     }
 
     @Test
+    public void shouldHaveNullDefaultCloseCode() {
+        assertThat(webSocketResponse().getCloseCode(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldReturnCloseCode() {
+        assertThat(webSocketResponse().withCloseCode(4001).getCloseCode(), is(4001));
+    }
+
+    @Test
+    public void shouldBeEqualWhenSameCloseCode() {
+        HttpWebSocketResponse responseOne = webSocketResponse().withCloseCode(4001);
+        HttpWebSocketResponse responseTwo = webSocketResponse().withCloseCode(4001);
+
+        assertThat(responseOne, is(responseTwo));
+        assertThat(responseOne.hashCode(), is(responseTwo.hashCode()));
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenDifferentCloseCode() {
+        assertThat(
+            webSocketResponse().withCloseCode(1000),
+            is(not(webSocketResponse().withCloseCode(4001)))
+        );
+    }
+
+    @Test
     public void shouldAddSingleMessage() {
         WebSocketMessage messageOne = webSocketMessage("msg1");
         WebSocketMessage messageTwo = webSocketMessage("msg2");
