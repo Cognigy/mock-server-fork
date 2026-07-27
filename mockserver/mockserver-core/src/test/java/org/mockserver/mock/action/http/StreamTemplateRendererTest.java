@@ -1,12 +1,14 @@
 package org.mockserver.mock.action.http;
 
 import org.junit.Test;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpTemplate;
 import org.mockserver.templates.engine.model.WebSocketFrameContext;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
+import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -255,5 +257,43 @@ public class StreamTemplateRendererTest {
             new WebSocketFrameContext("hello", null, 3));
 
         assertThat(rendered, is("turn=3"));
+    }
+
+    // ----- N1: a locked-down allow-list blocks Java.type reach-through yet leaves frame templating intact -----
+    // Mirrors the hardened default baked into the fork's Docker image (MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES):
+    // a non-empty allow-list that matches no real class turns Java.type(...) into a hard failure for EVERY host
+    // class, while the host-bound jsonPath/xPath helpers and JS built-ins (not resolved via Java.type) keep
+    // working — so the jambonz msgid echo is unaffected by the sandbox. Guards the exact interaction the image
+    // relies on: sandbox ON + frame jsonPath must coexist.
+
+    private static Configuration denyAllJavaTypeConfiguration() {
+        // "none" is a placeholder that can never equal a real class name, so matchesAny(...) refuses every
+        // Java.type(...) lookup while still activating allow-list mode (a blank value would be unrestricted).
+        Configuration configuration = configuration();
+        configuration.javascriptAllowedClasses("none");
+        return configuration;
+    }
+
+    private final StreamTemplateRenderer lockedDownRenderer =
+        new StreamTemplateRenderer(new MockServerLogger(StreamTemplateRendererTest.class), denyAllJavaTypeConfiguration());
+
+    @Test
+    public void shouldStillEchoFrameMsgidUnderDenyAllAllowList() {
+        String rendered = lockedDownRenderer.render(
+            HttpTemplate.TemplateType.JAVASCRIPT,
+            "return '{\"type\":\"ack\",\"msgid\":\"' + jsonPath('$.msgid') + '\"}';",
+            request().withBody("{\"msgid\":\"UPGRADE-BODY\"}"),
+            SESSION_NEW_FRAME);
+
+        assertThat(rendered, is("{\"type\":\"ack\",\"msgid\":\"m-1\"}"));
+    }
+
+    @Test
+    public void shouldBlockJavaTypeInFrameTemplateUnderDenyAllAllowList() {
+        assertThrows(RuntimeException.class, () -> lockedDownRenderer.render(
+            HttpTemplate.TemplateType.JAVASCRIPT,
+            "return String(Java.type('java.lang.Runtime').getRuntime().availableProcessors());",
+            request(),
+            SESSION_NEW_FRAME));
     }
 }

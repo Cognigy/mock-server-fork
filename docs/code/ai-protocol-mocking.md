@@ -97,7 +97,7 @@ flowchart TB
 > because the dashboard code generator now always emits `closeConnection` explicitly, so generated
 > snippets no longer depend on the default in either direction.
 
-Since T1.2, streaming payloads can be **templated**: setting an optional `templateType` (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`) on the `httpSseResponse` (or `httpWebSocketResponse`, or per-message on `grpcStreamResponse`) renders each event's `data` (each WebSocket text frame / each gRPC message `json`) as a response template against the triggering request via the shared `StreamTemplateRenderer` — same request/template context as `httpResponseTemplate` (`$!request.body`, `$jsonPath(...)`, built-in helpers, `faker`, `scenario`). Rendering is per event/message and opt-in; with no `templateType` payloads are emitted byte-for-byte unchanged. See *Templated streaming payloads* in [request-processing.md](request-processing.md).
+Since T1.2, streaming payloads can be **templated**: setting an optional `templateType` (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`) on the `httpSseResponse` (or `httpWebSocketResponse`, or per-message on `grpcStreamResponse`) renders each event's `data` (each WebSocket text frame / each gRPC message `json`) as a response template against the triggering request via the shared `StreamTemplateRenderer` — same request/template context as `httpResponseTemplate` (`$!request.body`, `$jsonPath.find(...)`, built-in helpers, `faker`, `scenario`). Rendering is per event/message and opt-in; with no `templateType` payloads are emitted byte-for-byte unchanged. See *Templated streaming payloads* in [request-processing.md](request-processing.md).
 
 ```mermaid
 sequenceDiagram
@@ -193,7 +193,9 @@ When the response carries `matchers`, the handler additionally installs a **`Bid
 
 ### Frame-aware matcher-response templating
 
-When the action's top-level `templateType` is set (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`), every matcher-response text frame — `matchers[].responses[].text` and `turns[][].text` — is rendered as a response template through the shared `StreamTemplateRenderer`, using the same engines and helpers (`faker`, `scenario`, built-ins) as `httpResponseTemplate`. This reuses the same field that already templated the eager `messages[]`; there is no per-matcher template flag. A render failure logs at WARN and sends the raw text — it never drops the connection. Binary frames are never templated.
+When the action's top-level `templateType` is set (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`), every matcher-response text frame — `matchers[].responses[].text` and `turns[][].text` — is rendered as a response template through the shared `StreamTemplateRenderer`, using the same engines and helpers (`faker`, `scenario`, built-ins) as `httpResponseTemplate`. This reuses the same field that already templated the eager `messages[]`; there is no per-matcher template flag. Binary frames are never templated.
+
+A render failure **fails loud**: the handler logs at ERROR and closes the connection with WebSocket status **1011** (internal error) — it never ships the unrendered template source as the reply (a garbage frame the client would silently mis-handle). This is consistent with the other streaming template paths, which also close rather than emit raw source on a render failure (they differ in detail — the eager `messages[]` path logs at WARN and closes with the configured code; SSE closes the stream). The most common cause is `templateType: JAVASCRIPT` on a runtime **without GraalJS on the classpath** — the standard `mockserver/mockserver` image omits it; the fork's `docker/local` image and `docker/graaljs` bundle it (jars in `/libs`). Use `VELOCITY`/`MUSTACHE` if GraalJS is unavailable.
 
 Two template variables are in scope simultaneously:
 
@@ -211,6 +213,12 @@ Per-dialect syntax (verified in `StreamTemplateRendererTest`):
 | **JAVASCRIPT** | `frame.text` (plain string; `JSON.parse(frame.text)` works) | `frame.turnIndex` | `jsonPath('$.msgid')` |
 
 In every dialect `request.*` still resolves the upgrade request in the same template while `jsonPath`/`xPath` resolve the frame body. The JavaScript template body is wrapped as `function handle(request, frame) { … }`.
+
+Notes and pitfalls (all verified against code, not assumed):
+
+- **`jsonPath` is a helper, not a bare function in Velocity/Mustache.** Velocity: `$jsonPath.find("$.msgid")` (also `$jsonPath.jsonPath(...)`) — there is **no** `$jsonPath.read(...)`, and both methods take a single JSONPath argument. Mustache uses the section-lambda form in the table. JavaScript is the only dialect where `jsonPath('$.msgid')` is a direct call.
+- **There is no `frame.json`.** `WebSocketFrameContext` exposes only `text`, `binaryBase64`, `turnIndex`. Parse the body yourself: JS `JSON.parse(frame.text)`, or use `jsonPath('$…')` / `$jsonPath.find("$…")` which already read the frame body.
+- **JavaScript sandbox.** GraalJS guest scripts run under `HostAccess.ALL`, gated only by `mockserver.javascriptAllowedClasses` (env `MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES`). Empty (upstream default) = unrestricted: a template can reach `java.lang.Runtime`/`ProcessBuilder` via `Java.type(...)`. The fork's `docker/local` image bakes a deny-all allow-list (`none`) so `Java.type(...)` is refused while the bound `jsonPath`/`xPath` helpers and JS built-ins keep working. Set an explicit allow-list if a template legitimately needs specific Java classes.
 
 ### Sequential turns and exhaustion
 

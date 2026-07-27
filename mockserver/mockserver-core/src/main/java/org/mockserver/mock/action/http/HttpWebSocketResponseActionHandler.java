@@ -571,24 +571,34 @@ public class HttpWebSocketResponseActionHandler {
                     // Opt-in templating: render the text payload with the inbound frame bound under
                     // {@code frame} (so a response can echo the frame's contents) when a templateType is
                     // set. Rendering happens before breakpoint dispatch so interception observes the
-                    // rendered bytes. A render failure never kills the connection — warn and send raw.
+                    // rendered bytes. A render failure MUST fail loud: never ship the unrendered template
+                    // source (e.g. a JAVASCRIPT source string, or a template that references a missing
+                    // engine) as the reply — the client would silently mis-handle a garbage frame with no
+                    // signal. Match the sibling scheduled-messages path (which closes on failure): log at
+                    // ERROR and close with 1011 (internal error) so the client observes an abnormal close
+                    // rather than a plausible-looking bad ack. onSent still fires so a pending
+                    // onExhausted: CLOSE countdown cannot be stranded.
                     String text = message.getText();
                     if (httpWebSocketResponse.getTemplateType() != null) {
                         try {
                             text = templateRenderer.render(httpWebSocketResponse.getTemplateType(), message.getText(), request, frameContext);
                         } catch (Exception e) {
-                            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                            if (mockServerLogger.isEnabledForInstance(Level.ERROR)) {
                                 mockServerLogger.logEvent(
                                     new LogEntry()
-                                        .setLogLevel(Level.WARN)
+                                        .setLogLevel(Level.ERROR)
                                         .setCorrelationId(request.getLogCorrelationId())
                                         .setHttpRequest(request)
-                                        .setMessageFormat("exception rendering WebSocket matcher response template for request:{} - sending raw text")
-                                        .setArguments(request)
+                                        .setMessageFormat("exception rendering WebSocket matcher response template with engine {} for request:{} - closing connection, frame NOT sent")
+                                        .setArguments(httpWebSocketResponse.getTemplateType(), request)
                                         .setThrowable(e)
                                 );
                             }
-                            text = message.getText();
+                            if (handshaker != null && senderCtx.channel().isActive()) {
+                                handshaker.close(senderCtx.channel(), new CloseWebSocketFrame(WebSocketCloseStatus.INTERNAL_SERVER_ERROR));
+                            }
+                            invokeOnSent(onSent);
+                            return;
                         }
                     }
                     frameBytes = text.getBytes(StandardCharsets.UTF_8);

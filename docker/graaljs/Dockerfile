@@ -99,7 +99,7 @@ RUN if [ -s /tmp/local-ca.pem ]; then \
 # networks, CI). GNU wget retries host-resolution + connection-refused errors;
 # BusyBox wget ignores /etc/wgetrc, so this is a safe no-op there.
 RUN printf 'tries=5\ntimeout=60\nwaitretry=10\nretry_on_host_error=on\nretry_connrefused=on\n' >> /etc/wgetrc
-ARG GRAALJS_VERSION=25.0.3
+ARG GRAALJS_VERSION=25.1.3
 # GraalVM 25.x dropped the JSR-223 javax.script bridge (js-scriptengine.jar is gone).
 # Coordinates also changed: icu4j is now under org.graalvm.shadowed instead of com.ibm.icu,
 # and jniutils is a new artifact required by truffle-runtime.

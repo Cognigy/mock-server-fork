@@ -61,6 +61,34 @@ RUN /runtime/bin/java -XX:ArchiveClassesAtExit=/mockserver.jsa \
     kill -TERM "$SERVER_PID" && wait "$SERVER_PID" || true; \
     ls -l /mockserver.jsa
 
+# download GraalJS JARs — enables the JAVASCRIPT template engine at runtime. FORK CHANGE: upstream
+# docker/local ships without GraalJS (JS templating lives only in docker/graaljs); this fork bakes it
+# into the standard perf image because the WebSocket mocking use case authors matcher-response
+# templates in JavaScript. Pinned to 25.1.3 to match the org.graalvm.polyglot version the code is
+# compiled against (mockserver/pom.xml) — do NOT let this drift from the pom. The jars land in /libs,
+# which the entrypoint classpath already includes; MockServer detects polyglot on the classpath and
+# enables the JS engine. GraalJS runs in Truffle interpreted mode on this stock (non-Graal) JDK.
+FROM alpine:3.24 AS graaljs
+# Harden Maven Central downloads against transient DNS/connection blips (GNU wget honours /etc/wgetrc;
+# BusyBox wget ignores it, so this is a safe no-op there).
+RUN printf 'tries=5\ntimeout=60\nwaitretry=10\nretry_on_host_error=on\nretry_connrefused=on\n' >> /etc/wgetrc \
+    && apk add --update ca-certificates wget
+ARG GRAALJS_VERSION=25.1.3
+# GraalVM 25.x coordinates: icu4j is under org.graalvm.shadowed; jniutils is a separate sdk artifact
+# required by truffle-runtime; the JSR-223 js-scriptengine jar no longer exists.
+RUN mkdir -p /graaljs && \
+    wget -O /graaljs/polyglot.jar "https://repo1.maven.org/maven2/org/graalvm/polyglot/polyglot/$GRAALJS_VERSION/polyglot-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/js-language.jar "https://repo1.maven.org/maven2/org/graalvm/js/js-language/$GRAALJS_VERSION/js-language-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/truffle-api.jar "https://repo1.maven.org/maven2/org/graalvm/truffle/truffle-api/$GRAALJS_VERSION/truffle-api-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/truffle-runtime.jar "https://repo1.maven.org/maven2/org/graalvm/truffle/truffle-runtime/$GRAALJS_VERSION/truffle-runtime-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/truffle-compiler.jar "https://repo1.maven.org/maven2/org/graalvm/truffle/truffle-compiler/$GRAALJS_VERSION/truffle-compiler-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/collections.jar "https://repo1.maven.org/maven2/org/graalvm/sdk/collections/$GRAALJS_VERSION/collections-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/nativeimage.jar "https://repo1.maven.org/maven2/org/graalvm/sdk/nativeimage/$GRAALJS_VERSION/nativeimage-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/word.jar "https://repo1.maven.org/maven2/org/graalvm/sdk/word/$GRAALJS_VERSION/word-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/jniutils.jar "https://repo1.maven.org/maven2/org/graalvm/sdk/jniutils/$GRAALJS_VERSION/jniutils-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/regex.jar "https://repo1.maven.org/maven2/org/graalvm/regex/regex/$GRAALJS_VERSION/regex-$GRAALJS_VERSION.jar" && \
+    wget -O /graaljs/icu4j.jar "https://repo1.maven.org/maven2/org/graalvm/shadowed/icu4j/$GRAALJS_VERSION/icu4j-$GRAALJS_VERSION.jar"
+
 # runtime image — distroless base + trimmed JDK 25 runtime + jar + AppCDS archive
 # (digest-pinned per repo convention; update the digest together with the Temurin 25 build, since
 # the baked AppCDS archive is specific to the JDK build it was trained with — same base+digest as
@@ -86,6 +114,11 @@ COPY --from=appcds-build /runtime /usr/lib/jvm/temurin25-trimmed
 COPY --from=appcds-build /mockserver-netty-jar-with-dependencies.jar /
 COPY --from=appcds-build /mockserver.jsa /
 
+# GraalJS jars → /libs (entrypoint classpath already includes /libs/*). FORK CHANGE, see the graaljs
+# stage above. The baked AppCDS archive was trained WITHOUT graal on the classpath; -Xshare:auto
+# degrades gracefully (the graal classes simply load normally, uncovered by the archive).
+COPY --from=graaljs /graaljs/*.jar /libs/
+
 # don't run MockServer as root
 USER nonroot
 
@@ -102,6 +135,17 @@ USER nonroot
 ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "-XX:MaxRAMPercentage=75.0", "-XX:SharedArchiveFile=/mockserver.jsa", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
+
+# JS sandbox hardening (FORK CHANGE, pairs with the bundled GraalJS above). GraalJS guest scripts run
+# under HostAccess.ALL, gated ONLY by mockserver.javascriptAllowedClasses. Upstream default is empty
+# = unrestricted, so a template could reach java.lang.Runtime / ProcessBuilder via Java.type(...).
+# A non-empty allow-list activates allow-list mode and refuses every class not on it; "none" can never
+# equal a real class name, so this denies ALL Java.type(...) reach-through while the host-bound
+# jsonPath / xPath helpers and JS built-ins (JSON, etc.) — which are NOT resolved via Java.type — keep
+# working. WebSocket/response templates that only echo request/frame data (the intended use) are
+# unaffected. Override at runtime (-e MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES=...) if a template
+# legitimately needs specific Java classes.
+ENV MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES=none
 
 # Dashboard usage analytics (PostHog Cloud EU, cookieless). EMPTY by default so a plain
 # `docker build` — i.e. forks / self-hosters building this Dockerfile directly — ships analytics

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **WebSocket matcher-response template render failures now fail loud instead of shipping the raw
+  template.** When a `httpWebSocketResponse` matcher reply had a `templateType` set and rendering threw
+  — most commonly `templateType: JAVASCRIPT` on a runtime without GraalJS on the classpath (the
+  standard `mockserver/mockserver` image omits it) — the handler swallowed the exception at WARN and
+  sent the **unrendered template source** as the frame. A real client silently mis-handled the garbage
+  ack, retried, and the exchange failed with no signal. The handler now logs at ERROR and closes the
+  connection with WebSocket status 1011 (internal error), never emitting an unrendered frame —
+  consistent with the other streaming template paths (SSE, eager `messages[]`), which likewise close on
+  a render failure rather than shipping raw source. The `onExhausted: CLOSE` frame-sent countdown still
+  completes on this path, so a render failure mid-turn cannot strand a pending close.
 - **`archiver.glob()` works again in `@mockserver/testcontainers` (Node), and CVE-2026-14257 stays
   closed.** The previous remedy for the `brace-expansion` denial of service (GHSA-mh99-v99m-4gvg,
   patched only in 5.0.8) was a blanket `"brace-expansion": "^5.0.8"` override. That resolved the whole
@@ -66,6 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default-queue instances with margin.
 
 ### Added
+- **The `docker/local` image now bundles the GraalJS engine and hardens the JavaScript sandbox by
+  default.** `templateType: JAVASCRIPT` templates (e.g. a WebSocket matcher echoing an inbound `msgid`)
+  need GraalJS on the classpath, which the standard image previously omitted — only the separate
+  `docker/graaljs` image carried it. The GraalJS 25.1.3 jars (version-matched to the compiled
+  `org.graalvm.polyglot` dependency) are now downloaded into `/libs` (already on the entrypoint
+  classpath), keeping the AppCDS fast-start runtime. The image also bakes
+  `MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES=none`, a deny-all allow-list that refuses `Java.type(...)`
+  reach-through to `java.lang.Runtime`/`ProcessBuilder` while leaving the bound `jsonPath`/`xPath`
+  helpers and JS built-ins working; override it if a template legitimately needs specific Java classes.
+  `docker/graaljs` was aligned from 25.0.3 to 25.1.3 to remove version drift.
 - **`httpWebSocketResponse` matcher responses can now be templated per inbound frame.** When the
   action's top-level `templateType` (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`) is set, each `matchers[].responses[].text`
   (and each `matchers[].turns[][].text`, see below) is rendered as a response template — previously only
