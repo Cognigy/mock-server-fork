@@ -166,10 +166,14 @@ Extraction is best-effort: any parse error is silently swallowed, leaving all th
 
 ## WebSocket Mocking
 
+A `httpWebSocketResponse` action upgrades the request to a WebSocket, eagerly pushes a `messages` list on connect, and — when `matchers` are configured — replies to each inbound frame with the first matching rule's frames. Since these gaps were closed, matcher replies can be **templated per inbound frame**, matchers can walk a **sequential `turns` script** with an `onExhausted` policy, and the server's close status is configurable via **`closeCode`**.
+
 ### Model
 
-- **`WebSocketMessage`** (`mockserver-core/.../model/WebSocketMessage.java`) — Single WebSocket message with `text`, `binary`, and `delay` fields
-- **`HttpWebSocketResponse`** (`mockserver-core/.../model/HttpWebSocketResponse.java`) — Action type extending `Action<HttpWebSocketResponse>` with `subprotocol`, `messages` list, and `closeConnection` flag
+- **`WebSocketMessage`** (`mockserver-core/.../model/WebSocketMessage.java`) — a single WebSocket message with `text`, `binary`, and `delay` fields
+- **`WebSocketMessageMatcher`** (`mockserver-core/.../model/WebSocketMessageMatcher.java`) — a per-incoming-frame rule: `frameType` (`TEXT`/`BINARY`/`PING`/`PONG`/`ANY`), a `textMatcher` (exact string, Java regex, or JSON-schema, honouring negation), and **either** a flat `responses` list **or** a sequential `turns` script (`List<List<WebSocketMessage>>`) with an `onExhausted` policy. `responses` and `turns` are mutually exclusive
+- **`WebSocketOnExhausted`** (`mockserver-core/.../model/WebSocketOnExhausted.java`) — `REPEAT` / `CLOSE` / `IGNORE` (default `IGNORE`); governs what a sequential matcher does after its last turn
+- **`HttpWebSocketResponse`** (`mockserver-core/.../model/HttpWebSocketResponse.java`) — action type extending `Action<HttpWebSocketResponse>` with `subprotocol`, `messages` list, `matchers` list, `closeConnection` flag, `closeCode`, `templateType`, and `graphqlSubscriptionFilter`
 
 ### Action Type
 
@@ -177,13 +181,61 @@ Extraction is best-effort: any parse error is silently swallowed, leaving all th
 
 ### Handler
 
-`HttpWebSocketResponseActionHandler` performs the WebSocket handshake using Netty's `WebSocketServerHandshakerFactory`, then sends configured messages as `TextWebSocketFrame` or `BinaryWebSocketFrame`. It:
+`HttpWebSocketResponseActionHandler` performs the WebSocket handshake using Netty's `WebSocketServerHandshakerFactory`, then sends the eager `messages` as `TextWebSocketFrame` or `BinaryWebSocketFrame`. It:
 
 1. Reconstructs a Netty `FullHttpRequest` from the MockServer `HttpRequest` (preserving headers including `Sec-WebSocket-Key`)
 2. Performs the WebSocket handshake
 3. Removes HTTP codecs from the pipeline
-4. Sends each message with optional per-message delays
-5. Optionally sends `CloseWebSocketFrame` and closes the connection
+4. Sends each eager message with optional per-message delays
+5. Optionally sends `CloseWebSocketFrame` and closes the connection (see *Close semantics*)
+
+When the response carries `matchers`, the handler additionally installs a **`BidirectionalWebSocketFrameHandler`** (`mockserver-core/.../mock/action/http/`) after the handshake. That handler is instantiated once per connection and processes every inbound frame on the connection's single event-loop thread, so its per-connection state (turn cursors) needs no synchronization and dies with the connection. It evaluates the matcher list in order, first match wins; an unmatched frame is passed through to the next handler (the proxy-relay path).
+
+### Frame-aware matcher-response templating
+
+When the action's top-level `templateType` is set (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`), every matcher-response text frame — `matchers[].responses[].text` and `turns[][].text` — is rendered as a response template through the shared `StreamTemplateRenderer`, using the same engines and helpers (`faker`, `scenario`, built-ins) as `httpResponseTemplate`. This reuses the same field that already templated the eager `messages[]`; there is no per-matcher template flag. A render failure logs at WARN and sends the raw text — it never drops the connection. Binary frames are never templated.
+
+Two template variables are in scope simultaneously:
+
+- **`request`** — always bound to the original HTTP **upgrade** request (`request.path`, `request.headers`, …), exactly as in a normal response template.
+- **`frame`** — the inbound WebSocket frame that triggered the match (a `WebSocketFrameContext`): `frame.text` (TEXT payload), `frame.binaryBase64` (Base64 of a BINARY payload — exactly one of the two is non-null), and `frame.turnIndex` (0-based turn index, or null when the matcher is not sequential).
+
+When the matched frame carries text, the `jsonPath` / `xPath` helpers are **rebound to the frame body** (internally `new HttpRequest().withBody(frame.text)`), so a mock can extract a field from the inbound frame — e.g. echo its `msgid` back in an ack. A binary-only frame (text null) and the no-frame case leave `jsonPath`/`xPath` bound to the upgrade request.
+
+Per-dialect syntax (verified in `StreamTemplateRendererTest`):
+
+| | Frame text | Turn index | Echo inbound `msgid` (jsonPath over frame body) |
+|---|---|---|---|
+| **VELOCITY** | `$frame.text` | `$frame.turnIndex` | `$jsonPath.find("$.msgid")` |
+| **MUSTACHE** | `{{frame.text}}` | `{{frame.turnIndex}}` | `{{#jsonPath}}$.msgid{{/jsonPath}}{{jsonPathResult}}` |
+| **JAVASCRIPT** | `frame.text` (plain string; `JSON.parse(frame.text)` works) | `frame.turnIndex` | `jsonPath('$.msgid')` |
+
+In every dialect `request.*` still resolves the upgrade request in the same template while `jsonPath`/`xPath` resolve the frame body. The JavaScript template body is wrapped as `function handle(request, frame) { … }`.
+
+### Sequential turns and exhaustion
+
+A matcher's `turns` field (an array of arrays of frames) makes it **sequential**: successive matching frames on the same connection emit turn 0, then turn 1, and so on, rather than replying with the same `responses` every time. Each turn's frames carry `frame.turnIndex` equal to their cursor position. An **empty inner array is a legal turn** meaning "matched, reply with nothing" (fire-and-forget) — the cursor still advances. The cursor is a per-matcher slot in the handler's `int[] turnCursors`, so two connections keep independent progress.
+
+`onExhausted` governs matches after the final turn: `IGNORE` (default) and `null` consume the frame silently; `REPEAT` wraps back to turn 0; `CLOSE` closes the connection once the final turn's frames have all flushed (tracked by an `AtomicInteger` countdown over each frame's send-completion callback; immediately when the final turn is empty). In every `turns` case the frame is consumed by first-match-wins — there is **no** fall-through to later matchers or the pipeline.
+
+```mermaid
+flowchart TD
+    M["Inbound frame matches sequential matcher\n(cursor = turnCursors[i])"] --> C{"cursor < turns.size?"}
+    C -->|yes| E["Emit turns[cursor]\n(frames carry turnIndex = cursor)\nadvance cursor++"]
+    E --> F{"final turn\nand onExhausted = CLOSE?"}
+    F -->|yes| CL["Close after all frames flush\n(uses closeCode)"]
+    F -->|no| W["Await next matching frame"]
+    C -->|"no (exhausted)"| X{"onExhausted?"}
+    X -->|REPEAT| R["cursor = 0, emit turns[0]"]
+    X -->|"IGNORE / null"| I["Consume frame silently\n(no reply, no fall-through)"]
+    R --> W
+```
+
+### Close semantics
+
+`closeCode` (top-level, integer 1000–4999, default `null` → 1000 normal closure) is the WebSocket close status the server sends **whenever it closes** a mocked connection — the eager-`messages` finish, a `closeConnection: true`, an exhausted `CLOSE` matcher, and the breakpoint CLOSE action all route through the handler's `closeFrame(...)`. An invalid code is logged at WARN and falls back to 1000. The GraphQL subscription path always closes with 1000.
+
+`closeCode` (which code) is orthogonal to `closeConnection` (whether to close). Note the pre-existing WebSocket nuance called out under [SSE Streaming Responses](#sse-streaming-responses): for the eager `messages` path an **absent** `closeConnection` still means *close* (`finishWebSocket` closes when `closeConnection == null || closeConnection`). So a response that omits `closeConnection` but sets `closeCode` will close the eager stream with that configured code, not with 1000.
 
 ### Usage
 
@@ -1109,7 +1161,9 @@ Wiring: the matched `FORWARD`-family path threads the descriptor store into `Htt
 | `WebSocketMessageModelDTOTest` | core | 5 | Unit |
 | `HttpWebSocketResponseDTOTest` | core | 5 | Unit |
 | `ForwardChainExpectationTest` | client-java | 10 | Unit |
-| `WebSocketMockingIntegrationTest` | netty | 6 | Integration |
+| `BidirectionalWebSocketFrameHandlerTest` | core | 30 | Unit — matching, frame-context delivery, turn cursor machine (advance / empty-turn / REPEAT / IGNORE / CLOSE-after-countdown), independent per-connection cursors |
+| `StreamTemplateRendererTest` | core | 22 | Unit — per-dialect `frame` context: `frame.text`, `frame.turnIndex`, `msgid` echo via jsonPath over the frame body, upgrade-request + frame resolving together, null-frame parity |
+| `WebSocketMockingIntegrationTest` | netty | 12 | Integration — incl. per-dialect inbound-`msgid` echo (Velocity, JavaScript), a one-expectation jambonz conversation (3 matchers, `turns` + `onExhausted: CLOSE`, close 1000), configured `closeCode` (4001), `REPEAT` on exhaustion, and per-connection turn-cursor isolation |
 | `OpenAiRealtimeCodecTest` | core | 11 | Unit |
 | `GeminiLiveCodecTest` | core | 6 | Unit |
 | `RealtimeMockBuilderTest` | client-java | 4 | Unit |
