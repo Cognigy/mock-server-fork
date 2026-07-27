@@ -132,6 +132,7 @@ const ACTION_LABELS: ReadonlyArray<readonly [string, string]> = [
   ['httpForwardObjectCallback', 'forward callback'],
   ['httpOverrideForwardedRequest', 'override forward'],
   ['httpError', 'error'],
+  ['httpWebSocketResponse', 'websocket'],
   ['httpLlmResponse', 'LLM response'],
 ];
 

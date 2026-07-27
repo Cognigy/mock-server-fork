@@ -241,16 +241,46 @@ export interface StandardForwardFallbackState {
 
 export type WebSocketFrameType = 'TEXT' | 'BINARY' | 'PING' | 'PONG' | 'ANY';
 
+/**
+ * What a sequential (turns) matcher does once every turn has been played out.
+ * Only meaningful when the matcher is in `turns` mode. `IGNORE` (server default)
+ * silently consumes further matching frames; `REPEAT` wraps back to turn 0;
+ * `CLOSE` closes the connection after the final turn's frames flush.
+ */
+export type WebSocketOnExhausted = 'REPEAT' | 'CLOSE' | 'IGNORE';
+
+/**
+ * A bidirectional frame matcher. A matcher replies in ONE of two mutually
+ * exclusive modes:
+ *  - `responses` (default) — a static set of reply frames sent on every match;
+ *  - `turns` — a sequential conversation, one turn advanced per matching frame.
+ * The `mode` field selects which; `turns` / `onExhausted` are only read in turns
+ * mode, `responses` only in responses mode. `mode` is optional so pre-existing
+ * drafts (no `mode`) behave as `responses`.
+ */
 export interface WebSocketMatcherDraft {
   frameType: WebSocketFrameType;
   textMatcher: string;
+  /** Which reply mode this matcher uses. Absent ≡ 'responses' (back-compat). */
+  mode?: 'responses' | 'turns';
   responses: string; // one message per line
+  /**
+   * Sequential turns. Each entry is ONE turn, holding newline-separated messages
+   * (one message per line, exactly like `responses`). An empty entry ('') is a
+   * legal empty turn = "matched, reply with nothing" (fire-and-forget). Only
+   * emitted in turns mode.
+   */
+  turns?: string[];
+  /** Turn-exhaustion behaviour (turns mode only). Absent ≡ server default IGNORE. */
+  onExhausted?: WebSocketOnExhausted;
 }
 
 export interface StandardWebSocketState {
   subprotocol: string;
   messages: string; // one message per line (text frames)
   closeConnection: boolean;
+  /** WebSocket close status code (1000–4999). Numeric string; empty ≡ server default 1000. */
+  closeCode?: string;
   matchers: WebSocketMatcherDraft[];
 }
 
@@ -1280,13 +1310,36 @@ export function buildExpectationJson(
           wsPayload['messages'] = msgLines.map((text) => ({ text }));
         }
         wsPayload['closeConnection'] = ws.closeConnection;
+        // closeCode: emit only a valid integer; empty/blank ≡ server default 1000.
+        const closeCodeNum = parseInt((ws.closeCode ?? '').trim(), 10);
+        if (!isNaN(closeCodeNum)) wsPayload['closeCode'] = closeCodeNum;
         if (ws.matchers.length > 0) {
           wsPayload['matchers'] = ws.matchers.map((m) => {
             const matcherObj: Record<string, unknown> = { frameType: m.frameType };
             if (m.textMatcher.trim()) matcherObj['textMatcher'] = m.textMatcher.trim();
-            const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-            if (respLines.length > 0) {
-              matcherObj['responses'] = respLines.map((text) => ({ text }));
+            if (m.mode === 'turns') {
+              // Sequential turns: one inner array per turn. Preserve empty inner
+              // arrays ([] = a legal empty turn = reply with nothing). `turns` and
+              // `responses` are mutually exclusive server-side, so never emit both.
+              const turns = m.turns ?? [];
+              if (turns.length > 0) {
+                matcherObj['turns'] = turns.map((turn) =>
+                  turn
+                    .split(/\r?\n/)
+                    .map((l) => l.trim())
+                    .filter(Boolean)
+                    .map((text) => ({ text })),
+                );
+              }
+              // onExhausted omitted at the IGNORE default to keep the round-trip minimal.
+              if (m.onExhausted && m.onExhausted !== 'IGNORE') {
+                matcherObj['onExhausted'] = m.onExhausted;
+              }
+            } else {
+              const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+              if (respLines.length > 0) {
+                matcherObj['responses'] = respLines.map((text) => ({ text }));
+              }
             }
             return matcherObj;
           });
@@ -1546,6 +1599,22 @@ export const FORM_MODELED_REQUEST_KEYS: readonly string[] = [
   'pathParameters', 'body', 'secure', 'dnsName', 'dnsType', 'dnsClass',
 ];
 
+/**
+ * Top-level sub-fields of `httpWebSocketResponse` that the WebSocket form fully
+ * OWNS (emits authoritatively, deletes when cleared). Every OTHER sub-field on
+ * the original WS action (e.g. `templateType`, or a field added server-side
+ * after this form was written) is UNMODELED and must survive an edit-resave —
+ * see the httpWebSocketResponse deep-merge special-case in
+ * {@link mergeUnmodeledFields}. This set is the boundary between the two.
+ *
+ * NOTE: nested matcher sub-fields (per-message `binary`/`delay`, future
+ * matcher-level keys) are NOT covered — the form rebuilds the `matchers` array
+ * wholesale. Only top-level WS sub-fields are preserved.
+ */
+export const WS_FORM_MODELED_SUBKEYS: ReadonlySet<string> = new Set([
+  'subprotocol', 'messages', 'closeConnection', 'closeCode', 'matchers',
+]);
+
 export interface MergeUnmodeledOptions {
   /**
    * True (default) when the form owns the original's action slot, so the form's
@@ -1711,6 +1780,29 @@ export function mergeUnmodeledFields(
   if (actionModeled && formProvidesAction) {
     for (const k of ACTION_FAMILY_KEYS) delete result[k];
     for (const k of ACTION_FAMILY_KEYS) if (k in formJson) result[k] = formJson[k];
+
+    // httpWebSocketResponse ONLY — belt-and-braces against silent sub-field loss.
+    // The wholesale replace above rebuilds the WS action purely from the form, so
+    // any top-level WS sub-field the form does not model (`templateType`, or a
+    // field the server grows in future) would be dropped on an edit-resave. Re-graft
+    // those unmodeled sub-fields from the original onto the form's rebuilt action.
+    // The form-owned sub-fields ({@link WS_FORM_MODELED_SUBKEYS}) are left as the
+    // form emitted them, so clearing matchers / messages still works. Deliberately
+    // scoped to WS: other action families keep the plain wholesale-replace semantics.
+    if (
+      isPlainObject(formJson['httpWebSocketResponse']) &&
+      isPlainObject(original['httpWebSocketResponse'])
+    ) {
+      const origWs = original['httpWebSocketResponse'];
+      // Clone the form's WS action so we never mutate formJson (this fn is pure).
+      const mergedWs = structuredClone(formJson['httpWebSocketResponse']) as Record<string, unknown>;
+      for (const sub of Object.keys(origWs)) {
+        if (WS_FORM_MODELED_SUBKEYS.has(sub)) continue;
+        if (sub in mergedWs) continue;
+        mergedWs[sub] = structuredClone(origWs[sub]);
+      }
+      result['httpWebSocketResponse'] = mergedWs;
+    }
   }
   // else: leave the original action family untouched (preserve unmodeled action).
 
@@ -1754,7 +1846,19 @@ export function unmodeledFieldNames(
     if (actionFamily.has(key)) {
       // Replaced by the form when it owns the slot; preserved (and hence
       // reported) only when the original action is unmodeled.
-      if (!actionModeled) names.push(key);
+      if (!actionModeled) {
+        names.push(key);
+        continue;
+      }
+      // httpWebSocketResponse is form-modeled, but the merge still preserves its
+      // UNMODELED top-level sub-fields (see WS_FORM_MODELED_SUBKEYS). Report those
+      // so the "Preserving N fields" indicator stays honest for WS edits.
+      if (key === 'httpWebSocketResponse' && isPlainObject(original[key])) {
+        for (const sub of Object.keys(original[key] as Record<string, unknown>)) {
+          if (WS_FORM_MODELED_SUBKEYS.has(sub)) continue;
+          names.push(`httpWebSocketResponse.${sub}`);
+        }
+      }
       continue;
     }
     if (modeledTop.has(key)) continue;
@@ -2354,11 +2458,30 @@ function actionToJava(action: StandardActionPayload): string {
         lines.push(`            webSocketMessageMatcher()`);
         lines.push(`                .withFrameType(WebSocketFrameType.${m.frameType})`);
         if (m.textMatcher.trim()) lines.push(`                .withTextMatcher(string("${escapeJava(m.textMatcher.trim())}"))`);
-        const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        for (const r of respLines) lines.push(`                .withResponse(webSocketMessage("${escapeJava(r)}"))`);
+        if (m.mode === 'turns') {
+          // Sequential turns: one .withTurn(List<WebSocketMessage>) call per turn.
+          // An empty turn (Collections.emptyList()) is legal: reply with nothing.
+          for (const turn of m.turns ?? []) {
+            const turnMsgs = turn.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+            if (turnMsgs.length === 0) {
+              lines.push(`                .withTurn(Collections.emptyList())`);
+            } else {
+              const args = turnMsgs.map((t) => `webSocketMessage("${escapeJava(t)}")`).join(', ');
+              lines.push(`                .withTurn(Arrays.asList(${args}))`);
+            }
+          }
+          if (m.onExhausted && m.onExhausted !== 'IGNORE') {
+            lines.push(`                .withOnExhausted(WebSocketOnExhausted.${m.onExhausted})`);
+          }
+        } else {
+          const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          for (const r of respLines) lines.push(`                .withResponse(webSocketMessage("${escapeJava(r)}"))`);
+        }
         lines.push('        )');
       }
       lines.push(`        .withCloseConnection(${ws.closeConnection})`);
+      const wsCloseCode = parseInt((ws.closeCode ?? '').trim(), 10);
+      if (!isNaN(wsCloseCode)) lines.push(`        .withCloseCode(${wsCloseCode})`);
       lines.push(')');
       return lines.join('\n');
     }
@@ -2967,6 +3090,18 @@ function collectJavaImports(
         imp.add('import org.mockserver.model.WebSocketFrameType;');
         if (action.websocket.matchers.some((m) => m.textMatcher.trim())) {
           imp.add('import static org.mockserver.model.NottableString.string;');
+        }
+        if (action.websocket.matchers.some((m) => m.mode === 'turns' && m.onExhausted && m.onExhausted !== 'IGNORE')) {
+          imp.add('import org.mockserver.model.WebSocketOnExhausted;');
+        }
+        // withTurn takes List<WebSocketMessage>: non-empty turns are wrapped in
+        // Arrays.asList(...), empty turns in Collections.emptyList().
+        const turnLists = action.websocket.matchers.filter((m) => m.mode === 'turns').flatMap((m) => m.turns ?? []);
+        if (turnLists.some((t) => t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length > 0)) {
+          imp.add('import java.util.Arrays;');
+        }
+        if (turnLists.some((t) => t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length === 0)) {
+          imp.add('import java.util.Collections;');
         }
       }
       break;

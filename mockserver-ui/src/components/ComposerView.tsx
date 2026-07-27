@@ -72,6 +72,7 @@ import {
   type JsonMatchType,
   type StandardForwardFallbackState,
   type WebSocketFrameType,
+  type WebSocketOnExhausted,
   type StandardSseState,
   type StandardSseEventDraft,
   type StandardBinaryResponseState,
@@ -1534,17 +1535,40 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
       ? (ws['messages'] as Record<string, unknown>[]).map((m) => typeof m['text'] === 'string' ? m['text'] as string : '').join('\n')
       : '';
     const rawMatchers = Array.isArray(ws['matchers']) ? (ws['matchers'] as Record<string, unknown>[]) : [];
-    const matchers: WebSocketMatcherRow[] = rawMatchers.map((m) => ({
-      frameType: (['TEXT', 'BINARY', 'PING', 'PONG', 'ANY'].includes(m['frameType'] as string)
-        ? m['frameType'] as WebSocketFrameType
-        : 'ANY'),
-      // The WebSocketMessageMatcherDTO serialises textMatcher as a plain string (value only),
-      // but denottable also tolerates a NottableString object form defensively.
-      textMatcher: denottable(m['textMatcher']),
-      responses: Array.isArray(m['responses'])
-        ? (m['responses'] as Record<string, unknown>[]).map((r) => typeof r['text'] === 'string' ? r['text'] as string : '').join('\n')
-        : '',
-    }));
+    const matchers: WebSocketMatcherRow[] = rawMatchers.map((m) => {
+      // `turns` (array-of-arrays of message objects) and `responses` are mutually
+      // exclusive server-side; a matcher carrying `turns` loads in turns mode.
+      const hasTurns = Array.isArray(m['turns']);
+      const turns = hasTurns
+        ? (m['turns'] as unknown[]).map((turn) =>
+            Array.isArray(turn)
+              ? (turn as Record<string, unknown>[])
+                  .map((msg) => (typeof msg['text'] === 'string' ? (msg['text'] as string) : ''))
+                  .join('\n')
+              : '',
+          )
+        : [];
+      const validOnExhausted: WebSocketOnExhausted[] = ['IGNORE', 'REPEAT', 'CLOSE'];
+      return {
+        frameType: (['TEXT', 'BINARY', 'PING', 'PONG', 'ANY'].includes(m['frameType'] as string)
+          ? m['frameType'] as WebSocketFrameType
+          : 'ANY'),
+        // The WebSocketMessageMatcherDTO serialises textMatcher as a plain string (value only),
+        // but denottable also tolerates a NottableString object form defensively.
+        textMatcher: denottable(m['textMatcher']),
+        mode: hasTurns ? 'turns' : 'responses',
+        responses: Array.isArray(m['responses'])
+          ? (m['responses'] as Record<string, unknown>[]).map((r) => typeof r['text'] === 'string' ? r['text'] as string : '').join('\n')
+          : '',
+        // A turns matcher must keep at least one (possibly empty) turn row so the
+        // editor renders; [''] round-trips to [[]] which is dropped as no-turns —
+        // acceptable, an empty turns matcher is not a valid authoring state.
+        turns: hasTurns && turns.length > 0 ? turns : [''],
+        onExhausted: validOnExhausted.includes(m['onExhausted'] as WebSocketOnExhausted)
+          ? (m['onExhausted'] as WebSocketOnExhausted)
+          : 'IGNORE',
+      };
+    });
     return {
       type: 'websocket',
       websocketState: {
@@ -1553,6 +1577,7 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
         // Absent means CLOSE for WebSocket (HttpWebSocketResponseActionHandler reads
         // `== null || value`), so an absent field must load as ON — see the SSE note below.
         closeConnection: ws['closeConnection'] !== false,
+        closeCode: typeof ws['closeCode'] === 'number' ? String(ws['closeCode']) : '',
         matchers,
       },
     };
@@ -2335,13 +2360,21 @@ function ForwardFallbackPanel({
 interface WebSocketMatcherRow {
   frameType: WebSocketFrameType;
   textMatcher: string;
+  /** Reply mode: static responses (default) or a sequential conversation. */
+  mode: 'responses' | 'turns';
   responses: string; // one message per line
+  /** One entry per turn; each holds newline-separated messages ('' = empty turn). */
+  turns: string[];
+  /** Turn-exhaustion behaviour; only meaningful in 'turns' mode. */
+  onExhausted: WebSocketOnExhausted;
 }
 
 interface WebSocketState {
   subprotocol: string;
   messages: string; // one message per line
   closeConnection: boolean;
+  /** WebSocket close status code (1000–4999); empty ≡ server default 1000. */
+  closeCode: string;
   matchers: WebSocketMatcherRow[];
 }
 
@@ -2355,7 +2388,10 @@ function WebSocketPanel({
   const addMatcher = () => {
     setState({
       ...state,
-      matchers: [...state.matchers, { frameType: 'ANY', textMatcher: '', responses: '' }],
+      matchers: [
+        ...state.matchers,
+        { frameType: 'ANY', textMatcher: '', mode: 'responses', responses: '', turns: [''], onExhausted: 'IGNORE' },
+      ],
     });
   };
   const removeMatcher = (idx: number) => {
@@ -2367,6 +2403,10 @@ function WebSocketPanel({
       matchers: state.matchers.map((m, i) => (i === idx ? { ...m, ...patch } : m)),
     });
   };
+  // Turn edits take the matcher row's CURRENT turns from the render scope, so the
+  // helpers never index into state.matchers (which is possibly-undefined under
+  // noUncheckedIndexedAccess) and always operate on the up-to-date array.
+  const setTurns = (idx: number, turns: string[]) => updateMatcher(idx, { turns });
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
@@ -2392,20 +2432,33 @@ function WebSocketPanel({
         placeholder={'{"type":"connection_ack"}\n{"type":"ka"}'}
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
-      <FormControlLabel
-        control={
-          <Switch
-            size="small"
-            checked={state.closeConnection}
-            onChange={(e) => setState({ ...state, closeConnection: e.target.checked })}
-          />
-        }
-        label={
-          <Typography variant="body2">
-            Close connection after messages
-          </Typography>
-        }
-      />
+      <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
+        <FormControlLabel
+          control={
+            <Switch
+              size="small"
+              checked={state.closeConnection}
+              onChange={(e) => setState({ ...state, closeConnection: e.target.checked })}
+            />
+          }
+          label={
+            <Typography variant="body2">
+              Close connection after messages
+            </Typography>
+          }
+        />
+        <TextField
+          label="Close code"
+          size="small"
+          type="number"
+          value={state.closeCode}
+          onChange={(e) => setState({ ...state, closeCode: e.target.value })}
+          placeholder="1000"
+          helperText="1000–4999"
+          sx={{ width: 130 }}
+          slotProps={{ htmlInput: { min: 1000, max: 4999 } }}
+        />
+      </Box>
 
       <Divider sx={{ my: 0.5 }} />
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -2451,15 +2504,78 @@ function WebSocketPanel({
             </Button>
           </Box>
           <TextField
-            label="Responses (one message per line)"
-            multiline
-            minRows={2}
-            maxRows={6}
-            value={m.responses}
-            onChange={(e) => updateMatcher(idx, { responses: e.target.value })}
-            placeholder={'{"type":"pong"}\n{"type":"ka"}'}
-            slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
-          />
+            label="Reply mode"
+            size="small"
+            select
+            value={m.mode}
+            onChange={(e) => updateMatcher(idx, { mode: e.target.value as 'responses' | 'turns' })}
+            sx={{ width: { xs: '100%', sm: 220 } }}
+            helperText={
+              m.mode === 'turns'
+                ? 'Advance one turn per matching frame'
+                : 'Send the same responses on every match'
+            }
+          >
+            <MenuItem value="responses">Static responses</MenuItem>
+            <MenuItem value="turns">Sequential turns</MenuItem>
+          </TextField>
+          {m.mode === 'turns' ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {m.turns.map((turn, turnIdx) => (
+                <Box key={turnIdx} sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                  <TextField
+                    label={`Turn ${turnIdx + 1} (one message per line, empty = reply nothing)`}
+                    multiline
+                    minRows={2}
+                    maxRows={6}
+                    sx={{ flex: 1 }}
+                    value={turn}
+                    onChange={(e) => setTurns(idx, m.turns.map((t, i) => (i === turnIdx ? e.target.value : t)))}
+                    placeholder={'{"type":"ack","msgid":"$!frame.text"}'}
+                    slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+                  />
+                  <Button
+                    size="small"
+                    color="error"
+                    variant="outlined"
+                    onClick={() => setTurns(idx, m.turns.filter((_, i) => i !== turnIdx))}
+                    disabled={m.turns.length <= 1}
+                    sx={{ minWidth: 'auto', px: 1, mt: 0.5 }}
+                  >
+                    Remove
+                  </Button>
+                </Box>
+              ))}
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <Button size="small" variant="outlined" onClick={() => setTurns(idx, [...m.turns, ''])}>
+                  Add turn
+                </Button>
+                <TextField
+                  label="On exhausted"
+                  size="small"
+                  select
+                  value={m.onExhausted}
+                  onChange={(e) => updateMatcher(idx, { onExhausted: e.target.value as WebSocketOnExhausted })}
+                  sx={{ width: 160 }}
+                >
+                  {(['IGNORE', 'REPEAT', 'CLOSE'] as const).map((oe) => (
+                    <MenuItem key={oe} value={oe}>{oe}</MenuItem>
+                  ))}
+                </TextField>
+              </Box>
+            </Box>
+          ) : (
+            <TextField
+              label="Responses (one message per line)"
+              multiline
+              minRows={2}
+              maxRows={6}
+              value={m.responses}
+              onChange={(e) => updateMatcher(idx, { responses: e.target.value })}
+              placeholder={'{"type":"pong"}\n{"type":"ka"}'}
+              slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+            />
+          )}
         </Paper>
       ))}
     </Box>
@@ -3937,6 +4053,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     subprotocol: '',
     messages: '',
     closeConnection: false,
+    closeCode: '',
     matchers: [],
   });
   const [sseState, setSseState] = useState<StandardSseState>({
@@ -4341,6 +4458,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       subprotocol: websocketState.subprotocol,
       messages: websocketState.messages,
       closeConnection: websocketState.closeConnection,
+      closeCode: websocketState.closeCode,
       matchers: websocketState.matchers,
     };
     if (actionType === 'sse') a.sse = sseState;
