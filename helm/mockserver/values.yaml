@@ -143,7 +143,7 @@ service:
   port: 1080
   nodePort: ""
   test:
-    image: curlimages/curl:8.20.0
+    image: curlimages/curl:8.20.0@sha256:b3f1fb2a51d923260350d21b8654bbc607164a987e2f7c84a0ac199a67df812a
 
 # Prometheus Operator ServiceMonitor for scraping MockServer's Prometheus metrics.
 #
@@ -244,7 +244,7 @@ sidecar:
   # by the platform (e.g. an Istio CNI plugin) instead.
   iptables:
     enabled: false
-    image: "istio/proxyv2:1.20.0"
+    image: "istio/proxyv2:1.20.0@sha256:19e8ca96e4f46733a3377fa962cb88cad13a35afddb9139ff795e36237327137"
     # Destination ports to redirect to MockServer (the transparent proxy port).
     redirectPorts: "80,443"
     # The MockServer port iptables REDIRECTs intercepted traffic to.
@@ -271,7 +271,7 @@ webhook:
   # Webhook deployment image (the webhook handler itself)
   image:
     repository: mockserver/mockserver-webhook
-    tag: ""    # defaults to Chart.AppVersion
+    tag: "@sha256:7b5c13803335cb45fb3fe924ca6252c31fc0b81ad42db6b6da492b1432fd31bc"    # defaults to Chart.AppVersion
     pullPolicy: IfNotPresent
   replicaCount: 1
   # failurePolicy: Ignore means pods are created even if the webhook is down
@@ -292,7 +292,7 @@ webhook:
   # Sidecar injection configuration (what gets injected into target pods)
   sidecar:
     # image: ""                  # defaults to <image.repository>/mockserver:mockserver-<appVersion>
-    iptablesImage: "alpine:3.19"
+    iptablesImage: "alpine:3.19@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1"
     serverPort: 1080
     redirectPorts: "80,443"
     runAsUser: 65534
