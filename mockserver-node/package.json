@@ -39,7 +39,7 @@
     "mockserver-netty-7.5.0-jar-with-dependencies.jar"
   ],
   "devDependencies": {
-    "glob": "~13.0.6",
+    "glob": "~14.0.0",
     "grunt": "~1.6.2",
     "grunt-contrib-jshint": "~3.2.0",
     "grunt-exec": "~3.0.0"
