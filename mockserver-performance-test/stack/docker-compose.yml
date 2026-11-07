@@ -13,7 +13,7 @@
 # request/action counters but not the newer JVM gauges.
 services:
   mockserver:
-    image: ${MOCKSERVER_IMAGE:-mockserver/mockserver:latest}
+    image: ${MOCKSERVER_IMAGE:-mockserver/mockserver:latest@sha256:016f7d16bc88d2e1aa52d5a177f1aafee758cf70bea5e0624b0ab2c32f394df1}
     command: -serverPort 1080
     environment:
       MOCKSERVER_METRICS_ENABLED: "true"
@@ -23,7 +23,7 @@ services:
       - "1080:1080"
 
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     # enable the remote-write receiver so k6 can push its own load metrics.
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -36,7 +36,7 @@ services:
       - mockserver
 
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:11.4.0@sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
@@ -74,7 +74,7 @@ services:
 
   # Container CPU/memory (optional — `--profile monitoring`).
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    image: gcr.io/cadvisor/cadvisor:v0.49.1@sha256:3cde6faf0791ebf7b41d6f8ae7145466fed712ea6f252c935294d2608b1af388
     profiles: ["monitoring"]
     ports:
       - "8080:8080"

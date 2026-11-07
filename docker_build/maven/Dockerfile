@@ -7,7 +7,7 @@
 
 # Audit finding F-DKR-07: base image pinned by digest for reproducibility.
 # Refresh via Dependabot (ecosystem: docker).
-FROM ubuntu:24.04@sha256:cdb5fd928fced577cfecf12c8966e830fcdf42ee481fb0b91904eeddc2fe5eff
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
 
 LABEL maintainer="James Bloom <jamesdbloom@gmail.com>"
 
