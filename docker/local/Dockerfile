@@ -30,7 +30,7 @@
 #
 
 # AppCDS build stage — jlink-trimmed JDK 25 runtime + training run producing the AppCDS archive
-FROM eclipse-temurin:25-jdk-noble AS appcds-build
+FROM eclipse-temurin:25-jdk-noble@sha256:80f67fb3d6f76e2d817d98a4cc2a9cf05f054d4e6adc5e2144bde671d722e63f AS appcds-build
 
 COPY mockserver-netty-jar-with-dependencies.jar /mockserver-netty-jar-with-dependencies.jar
 

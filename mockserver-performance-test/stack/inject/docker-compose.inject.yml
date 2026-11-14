@@ -24,7 +24,7 @@
 services:
   # ---- the sink ---------------------------------------------------------------
   envoy:
-    image: ${ENVOY_IMAGE:-envoyproxy/envoy:v1.31-latest}
+    image: ${ENVOY_IMAGE:-envoyproxy/envoy:v1.31-latest@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865}
     profiles: ["n1", "n2", "n4", "n6"]
     command: ["-c", "/etc/envoy/envoy.yaml", "--concurrency", "${ENVOY_CONCURRENCY:-2}"]
     cpuset: "${ENVOY_CPUS-0-1}"
@@ -44,7 +44,7 @@ services:
   # 500 rps cap (which silently throttles) never binds — run-inject.sh asserts
   # mock_server_load_throttled stays ~0 to prove this.
   injector-1:
-    image: &injimg ${MOCKSERVER_IMAGE:-mockserver/mockserver:mockserver-snapshot}
+    image: &injimg ${MOCKSERVER_IMAGE:-mockserver/mockserver:mockserver-snapshot@sha256:d4a535571799b6e5a2fb5c4208cf79753bfd54ac956d58d5e26d79d2ae5e6d0e}
     profiles: ["n1", "n2", "n4", "n6"]
     command: &injcmd -serverPort 1080
     cpuset: "${I1_CPUS-2-3}"
@@ -137,7 +137,7 @@ services:
 
   # ---- observability ----------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     profiles: ["n1", "n2", "n4", "n6"]
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

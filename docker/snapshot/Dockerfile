@@ -8,7 +8,7 @@
 ARG source=download
 
 # build image — downloads snapshot artifacts from Sonatype, tcnative from Maven Central
-FROM alpine:3.24 AS download
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS download
 
 # Optional: trust a corporate root CA before `apk add`. The build context contains
 # ca-bundle.pem (empty in CI, populated locally behind a TLS-inspecting proxy).
@@ -47,7 +47,7 @@ RUN if [ "$TARGETARCH" = "amd64" ]; \
 RUN unzip netty-tcnative-boringssl-static.jar
 
 # build image — copies JAR from context, downloads tcnative from Maven Central
-FROM alpine:3.24 AS copy
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS copy
 
 COPY ca-bundle.pem /tmp/local-ca.pem
 RUN if [ -s /tmp/local-ca.pem ]; then \
@@ -81,7 +81,7 @@ RUN unzip netty-tcnative-boringssl-static.jar
 FROM ${source} AS intermediate
 
 # runtime image https://console.cloud.google.com/gcr/images/distroless/global/java17
-FROM gcr.io/distroless/java17:debug-nonroot@sha256:cf52131fe31016e12dc26dfb89b3e6cc7ab4386e2c74b7fa9ab87c92b72b37a4
+FROM gcr.io/distroless/java17:debug-nonroot@sha256:d9c3374eb5e8b16f0f02a9d6f1779ee025dee0cb6e7b7263766a1058c2579244
 
 # maintainer details
 LABEL org.opencontainers.image.authors="James Bloom <jamesdbloom@gmail.com>"

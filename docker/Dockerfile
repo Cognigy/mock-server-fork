@@ -8,7 +8,7 @@
 ARG source=download
 
 # build image — downloads release artifacts from Sonatype, tcnative from Maven Central
-FROM alpine:3.24 AS download
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS download
 
 # Optional: trust a corporate root CA before `apk add`. The build context contains
 # ca-bundle.pem (empty in CI, populated locally behind a TLS-inspecting proxy).
@@ -47,7 +47,7 @@ RUN if [ "$TARGETARCH" = "amd64" ]; \
 RUN unzip netty-tcnative-boringssl-static.jar
 
 # build image — copies JAR from context, downloads tcnative from Maven Central
-FROM alpine:3.24 AS copy
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS copy
 
 COPY ca-bundle.pem /tmp/local-ca.pem
 RUN if [ -s /tmp/local-ca.pem ]; then \
@@ -86,7 +86,7 @@ FROM ${source} AS intermediate
 # NOTE: the JVM inside this runtime image is JDK 25 — the MockServer library itself is still
 # compiled to the Java 17 bytecode floor (see AGENTS.md Java Compatibility Policy); running that
 # jar on a newer JVM is fully supported and is a runtime-only choice, independent of compilation.
-FROM eclipse-temurin:25-jdk-noble AS appcds-build
+FROM eclipse-temurin:25-jdk-noble@sha256:80f67fb3d6f76e2d817d98a4cc2a9cf05f054d4e6adc5e2144bde671d722e63f AS appcds-build
 
 COPY --from=intermediate mockserver-netty-jar-with-dependencies.jar /mockserver-netty-jar-with-dependencies.jar
 

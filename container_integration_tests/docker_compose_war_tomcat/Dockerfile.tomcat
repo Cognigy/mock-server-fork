@@ -2,7 +2,7 @@
 # Deploys mockserver-war into Tomcat 10.1 (Jakarta EE 10 / Servlet 6.0).
 # The WAR is deployed at the ROOT context (/) so all paths route to MockServer.
 #
-FROM tomcat:10.1-jdk17-temurin
+FROM tomcat:10.1-jdk17-temurin@sha256:741ed89b8a348ee899895effc15ed3065df2343f0d7853bb9005bd1d10ccd007
 
 # Remove the default ROOT webapp so our WAR gets the / context.
 RUN rm -rf /usr/local/tomcat/webapps/ROOT
