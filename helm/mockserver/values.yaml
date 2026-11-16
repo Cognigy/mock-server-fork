@@ -292,7 +292,7 @@ webhook:
   # Sidecar injection configuration (what gets injected into target pods)
   sidecar:
     # image: ""                  # defaults to <image.repository>/mockserver:mockserver-<appVersion>
-    iptablesImage: "alpine:3.19"
+    iptablesImage: "alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"
     serverPort: 1080
     redirectPorts: "80,443"
     runAsUser: 65534
